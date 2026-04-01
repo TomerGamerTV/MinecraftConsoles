@@ -57,23 +57,15 @@ elseif(CMAKE_HOST_UNIX)
   endforeach()
 
   # Ensure destination directory exists (rsync won't create intermediate dirs)
-  # Use execute_process so shell variables like ${EFFECTIVE_PLATFORM_NAME} are expanded
-  execute_process(COMMAND ${CMAKE_COMMAND} -E make_directory "${COPY_DEST}")
+  # Must use mkdir -p (not cmake -E make_directory) because Xcode build vars
+  # like ${EFFECTIVE_PLATFORM_NAME} need shell expansion at build time
+  execute_process(COMMAND mkdir -p "${COPY_DEST}")
 
   # Trailing slashes ensure rsync copies contents, not the directory itself
   execute_process(
-    COMMAND rsync ${rsync_args} --mkpath "${COPY_SOURCE}/" "${COPY_DEST}/"
+    COMMAND rsync ${rsync_args} "${COPY_SOURCE}/" "${COPY_DEST}/"
     RESULT_VARIABLE rs
   )
-
-  # Fallback: if rsync doesn't support --mkpath (older macOS), mkdir and retry
-  if(rs GREATER 0)
-    execute_process(COMMAND mkdir -p "${COPY_DEST}")
-    execute_process(
-      COMMAND rsync ${rsync_args} "${COPY_SOURCE}/" "${COPY_DEST}/"
-      RESULT_VARIABLE rs
-    )
-  endif()
 
   if(rs GREATER 0) # Any non-zero exit code indicates an error
     message(FATAL_ERROR "rsync failed (exit code ${rs})")

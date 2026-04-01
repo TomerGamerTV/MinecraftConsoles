@@ -15,10 +15,12 @@
 #include <unistd.h>
 
 // Basic Windows types
+typedef char                CHAR;
 typedef unsigned char       BYTE;
 typedef unsigned char      *PBYTE;
 typedef unsigned short      WORD;
 typedef unsigned int        DWORD;
+typedef unsigned int       *PDWORD;
 typedef unsigned long       ULONG;
 typedef unsigned long long  ULONGLONG;
 typedef long                LONG;
@@ -27,6 +29,7 @@ typedef unsigned int        UINT;
 typedef int                 INT;
 typedef int                 BOOL;
 typedef float               FLOAT;
+typedef void                VOID;
 typedef void               *PVOID;
 typedef void               *LPVOID;
 typedef const char         *LPCSTR;
@@ -41,6 +44,10 @@ typedef unsigned long       SIZE_T;
 typedef unsigned long       ULONG_PTR;
 typedef uint16_t            WCHAR;
 
+// CONST macro (Windows uses this as a qualifier)
+#ifndef CONST
+#define CONST const
+#endif
 // Boolean constants
 #ifndef TRUE
 #define TRUE 1

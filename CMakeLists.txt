@@ -84,6 +84,8 @@ function(configure_compiler_target target)
         -Wno-inconsistent-missing-override
         -fexceptions
         -frtti
+        # Disable std::byte to avoid ambiguity with codebase's `typedef unsigned char byte`
+        -D_LIBCPP_HAS_NO_BYTE
       )
     endif()
   endif()
