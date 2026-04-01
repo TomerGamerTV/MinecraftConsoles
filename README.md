@@ -18,9 +18,10 @@ If you're looking for Dedicated Server software, download its [Nightly Build her
 ## Platform Support
 
 - **Windows**: Supported for building and running the project
-- **macOS / Linux**: The Windows nightly build will run through Wine or CrossOver based on community reports, but this is unofficial and not currently tested by the maintainers when pushing updates
+- **macOS (ARM64 / Intel)**: Native build with Metal graphics. Download the [macOS Nightly Build](https://github.com/smartcmd/MinecraftConsoles/releases/tag/nightly-macos). Requires macOS 13.0+. MFi, PlayStation, and Xbox controllers are fully supported.
+- **iOS (ARM64)**: Native build with Metal graphics. Download the [iOS Nightly Build](https://github.com/smartcmd/MinecraftConsoles/releases/tag/nightly-ios) (.ipa for sideloading via AltStore, Sideloadly, or TrollStore). Requires iOS 15.0+. Supports controllers and touch controls with virtual joystick. Safe area handling for Dynamic Island and notch.
+- **macOS / Linux (Wine)**: The Windows nightly build will run through Wine or CrossOver based on community reports, but this is unofficial and not currently tested by the maintainers when pushing updates
 - **Android**: VIA x86 EMULATORS (like GameNative) ONLY! The Windows nightly build does run but has stability / frametime pacing issues frequently reported
-- **iOS**: No current support
 - **All Consoles**: Console support remains in the code, but maintainers are not currently verifying console functionality / porting UI Changes to the console builds at this time.
 
 ## Features
@@ -81,7 +82,7 @@ Minecraft.Client.exe -name Steve -fullscreen
 ```
 
 ## LAN Multiplayer
-LAN multiplayer is available on the Windows build
+LAN multiplayer is available on Windows, macOS, and iOS builds
 
 - Hosting a multiplayer world automatically advertises it on the local network
 - Other players on the same LAN can discover the session from the in-game Join Game menu
@@ -90,6 +91,63 @@ LAN multiplayer is available on the Windows build
 - Add servers to your server list with the in-game Add Server button (temp)
 - Rename yourself without losing data by keeping your `uid.dat`
 - Split-screen players can join in, even in Multiplayer
+
+## Building for macOS / iOS
+
+### Prerequisites
+- macOS 13.0+ with Xcode command-line tools (`xcode-select --install`)
+- CMake 3.24+ (`brew install cmake`)
+- For iOS: Full Xcode installation required
+
+### macOS Build
+```bash
+# ARM64 only (Apple Silicon, recommended)
+./build_macos.sh release arm64
+
+# Universal binary (ARM64 + Intel)
+./build_macos.sh release universal
+```
+Output: `build/macos-arm64/Release/Minecraft.Client.app`
+
+### iOS Build
+```bash
+# Device build (.ipa for sideloading)
+./build_ios.sh release device
+
+# Simulator build
+./build_ios.sh debug simulator
+```
+Output: `build/MinecraftLCE-iOS.ipa`
+
+### CMake Presets (manual)
+```bash
+# macOS
+cmake --preset macos-arm64
+cmake --build --preset macos-arm64-release --target Minecraft.Client
+
+# iOS
+cmake --preset ios
+cmake --build --preset ios-release --target Minecraft.Client
+```
+
+### Building with Xcode IDE
+CMake generates an Xcode project when you configure with an Apple preset. To open it in Xcode:
+
+```bash
+# Generate the Xcode project
+cmake --preset macos-arm64   # or: cmake --preset ios
+
+# Open in Xcode
+open build/macos-arm64/MinecraftConsoles.xcodeproj
+# or: open build/ios/MinecraftConsoles.xcodeproj
+```
+
+In Xcode:
+1. **Select the scheme**: Click the scheme picker (top-left, next to the stop button) and select **`Minecraft.Client`** — not `ZERO_CHECK`, `ALL_BUILD`, or `AssetFolderCopy`
+2. **Select the target device**: Choose **"My Mac"** for macOS, or your connected iPhone/iPad for iOS
+3. **Build & Run**: Press `Cmd+R` or click the play button
+
+> **Note**: `ZERO_CHECK` is a CMake internal target that verifies the project is up-to-date. `AssetFolderCopy_Minecraft.Client` copies game assets. `GenerateBuildVer` creates the build version header. You only need to build `Minecraft.Client` — it depends on all the others automatically.
 
 # Dedicated Server Software
 

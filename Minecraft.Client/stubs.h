@@ -186,7 +186,7 @@ class Keyboard
 public:
 	static void create() {}
 	static void destroy() {}
-#ifdef _WINDOWS64
+#if defined(_WINDOWS64) || defined(_APPLE_PLATFORM)
 	static bool isKeyDown(int keyCode);
 #else
 	static bool isKeyDown(int) { return false; }
@@ -251,7 +251,7 @@ public:
 	static const int KEY_LEFT = 54;
 	static const int KEY_RIGHT = 55;
 
-#ifdef _WINDOWS64
+#if defined(_WINDOWS64) || defined(_APPLE_PLATFORM)
 	// Map LWJGL-style key constant to Windows VK code
 	static int toVK(int keyConst);
 #endif
@@ -262,7 +262,7 @@ class Mouse
 public:
 	static void create() {}
 	static void destroy() {}
-#ifdef _WINDOWS64
+#if defined(_WINDOWS64) || defined(_APPLE_PLATFORM)
 	static int getX();
 	static int getY();
 	static bool isButtonDown(int button);

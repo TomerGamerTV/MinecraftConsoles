@@ -4,40 +4,46 @@
 #endif // __PS3__
 
 #ifdef __PS3__
-#include "PS3\Sentient\SentientManager.h"
+#include "PS3/Sentient/SentientManager.h"
 #include "StatsCounter.h"
-#include "PS3\Social\SocialManager.h"
+#include "PS3/Social/SocialManager.h"
 #include <libsn.h>
 #include <libsntuner.h>
 #elif defined _DURANGO
-#include "Durango\Sentient\SentientManager.h"
+#include "Durango/Sentient/SentientManager.h"
 #include "StatsCounter.h"
-#include "Durango\Social\SocialManager.h"
-#include "Durango\Sentient\DynamicConfigurations.h"
-#include "Durango\DurangoExtras\xcompress.h"
+#include "Durango/Social/SocialManager.h"
+#include "Durango/Sentient/DynamicConfigurations.h"
+#include "Durango/DurangoExtras/xcompress.h"
+#elif defined _APPLE_PLATFORM
+#include "Apple/Sentient/SentientManager.h"
+#include "StatsCounter.h"
+#include "Apple/Social/SocialManager.h"
+#include "Apple/Sentient/DynamicConfigurations.h"
+#include "Apple/Network/BSDNetLayer.h"
 #elif defined _WINDOWS64
-#include "Windows64\Sentient\SentientManager.h"
+#include "Windows64/Sentient/SentientManager.h"
 #include "StatsCounter.h"
-#include "Windows64\Social\SocialManager.h"
-#include "Windows64\Sentient\DynamicConfigurations.h"
-#include "Windows64\Network\WinsockNetLayer.h"
-#include "Windows64\Windows64_Xuid.h"
+#include "Windows64/Social/SocialManager.h"
+#include "Windows64/Sentient/DynamicConfigurations.h"
+#include "Windows64/Network/WinsockNetLayer.h"
+#include "Windows64/Windows64_Xuid.h"
 #elif defined __PSVITA__
-#include "PSVita\Sentient\SentientManager.h"
+#include "PSVita/Sentient/SentientManager.h"
 #include "StatsCounter.h"
-#include "PSVita\Social\SocialManager.h"
-#include "PSVita\Sentient\DynamicConfigurations.h"
+#include "PSVita/Social/SocialManager.h"
+#include "PSVita/Sentient/DynamicConfigurations.h"
 #include <libperf.h>
 #else
-#include "Orbis\Sentient\SentientManager.h"
+#include "Orbis/Sentient/SentientManager.h"
 #include "StatsCounter.h"
-#include "Orbis\Social\SocialManager.h"
-#include "Orbis\Sentient\DynamicConfigurations.h"
+#include "Orbis/Social/SocialManager.h"
+#include "Orbis/Sentient/DynamicConfigurations.h"
 #include <perf.h>
 #endif
 
 #if !defined(__PS3__) && !defined(__ORBIS__) && !defined(__PSVITA__)
-#ifdef _WINDOWS64
+#if defined(_WINDOWS64) || defined(_APPLE_PLATFORM)
 //C4JStorage StorageManager;
 C_4JProfile ProfileManager;
 #endif
@@ -189,22 +195,33 @@ D3DXVECTOR3::D3DXVECTOR3() {}
 D3DXVECTOR3::D3DXVECTOR3(float x, float y, float z) : x(x), y(y), z(z) {}
 D3DXVECTOR3& D3DXVECTOR3::operator += (CONST D3DXVECTOR3 & add) { x += add.x; y += add.y; z += add.z; return *this; }
 
+// Network layer abstraction - use BSDNetLayer on Apple, WinsockNetLayer on Windows
+#ifdef _APPLE_PLATFORM
+#define NetLayer BSDNetLayer
+typedef int SOCKET;
+#define INVALID_SOCKET (-1)
+#elif defined _WINDOWS64
+#define NetLayer WinsockNetLayer
+#endif
+
 BYTE IQNetPlayer::GetSmallId() { return m_smallId; }
 void IQNetPlayer::SendData(IQNetPlayer * player, const void* pvData, DWORD dwDataSize, DWORD dwFlags)
 {
-	if (WinsockNetLayer::IsActive())
+#if defined(_WINDOWS64) || defined(_APPLE_PLATFORM)
+	if (NetLayer::IsActive())
 	{
-		if (!WinsockNetLayer::IsHosting() && !m_isRemote)
+		if (!NetLayer::IsHosting() && !m_isRemote)
 		{
-			SOCKET sock = WinsockNetLayer::GetLocalSocket(m_smallId);
+			SOCKET sock = NetLayer::GetLocalSocket(m_smallId);
 			if (sock != INVALID_SOCKET)
-				WinsockNetLayer::SendOnSocket(sock, pvData, dwDataSize);
+				NetLayer::SendOnSocket(sock, pvData, dwDataSize);
 		}
 		else
 		{
-			WinsockNetLayer::SendToSmallId(player->m_smallId, pvData, dwDataSize);
+			NetLayer::SendToSmallId(player->m_smallId, pvData, dwDataSize);
 		}
 	}
+#endif
 }
 bool IQNetPlayer::IsSameSystem(IQNetPlayer * player) { return (this == player) || (!m_isRemote && !player->m_isRemote); }
 DWORD IQNetPlayer::GetSendQueueSize(IQNetPlayer * player, DWORD dwFlags) { return 0; }
@@ -282,9 +299,9 @@ IQNetPlayer* IQNet::GetLocalPlayerByUserIndex(DWORD dwUserIndex)
 	if (dwUserIndex == 0)
 	{
 		// Primary pad: use direct index when networking is active (smallId may not be 0)
-		if (WinsockNetLayer::IsActive())
+		if (NetLayer::IsActive())
 		{
-			DWORD idx = WinsockNetLayer::GetLocalSmallId();
+			DWORD idx = NetLayer::GetLocalSmallId();
 			if (idx < MINECRAFT_NET_MAX_PLAYERS &&
 				!m_player[idx].m_isRemote &&
 				Win64_IsActivePlayer(&m_player[idx], idx))
@@ -363,7 +380,11 @@ void IQNet::HostGame()
 	_iQNetStubState = QNET_STATE_SESSION_STARTING;
 	s_isHosting = true;
 	// Host slot keeps legacy XUID so old host player data remains addressable.
+#ifdef _WINDOWS64
 	m_player[0].m_resolvedXuid = Win64Xuid::GetLegacyEmbeddedHostXuid();
+#else
+	m_player[0].m_resolvedXuid = (PlayerUID)(0xe000d45248242f2e);
+#endif
 }
 void IQNet::ClientJoinGame()
 {
@@ -552,7 +573,7 @@ DWORD XEnableGuestSignin(BOOL fEnable) { return 0; }
 
 
 /////////////////////////////////////////////// Profile library
-#ifdef _WINDOWS64
+#if defined(_WINDOWS64) || defined(_APPLE_PLATFORM)
 static void* profileData[4];
 static bool s_bProfileIsFullVersion;
 void				C_4JProfile::Initialise(DWORD dwTitleID,

@@ -1,0 +1,159 @@
+name: Nightly macOS Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+    - 'main'
+    paths:
+      - '**'
+      - '!.gitignore'
+      - '!*.md'
+      - '!.github/**'
+      - '.github/workflows/nightly-macos.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-macos
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-14  # Apple Silicon runner
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup CMake
+      uses: lukka/get-cmake@latest
+
+    - name: Print Environment Info
+      run: |
+        echo "=== System Info ==="
+        uname -a
+        sw_vers
+        echo "=== Xcode Version ==="
+        xcodebuild -version
+        echo "=== Available SDKs ==="
+        xcodebuild -showsdks
+        echo "=== CMake Version ==="
+        cmake --version
+        echo "=== Metal Compiler ==="
+        xcrun -sdk macosx metal --version || echo "Metal compiler not found"
+
+    - name: Configure CMake (macOS ARM64)
+      run: |
+        echo "::group::CMake Configure"
+        cmake --preset macos-arm64 2>&1
+        echo "::endgroup::"
+
+    - name: Build macOS Client (Release)
+      run: |
+        echo "::group::CMake Build"
+        cmake --build --preset macos-arm64-release \
+          --target Minecraft.Client \
+          -- -allowProvisioningUpdates \
+             CODE_SIGN_IDENTITY="-" \
+             CODE_SIGNING_ALLOWED="NO" 2>&1
+        echo "::endgroup::"
+
+    - name: Package .app bundle
+      run: |
+        echo "=== Finding .app ==="
+        APP_PATH=$(find build/macos-arm64 -name "Minecraft.Client.app" -type d | head -1)
+        echo "Found: $APP_PATH"
+
+        if [ -z "$APP_PATH" ]; then
+          echo "ERROR: .app bundle not found"
+          find build/ -type f -name "Minecraft.Client*" || true
+          exit 1
+        fi
+
+        # Copy game assets into the bundle
+        RESOURCES_DIR="${APP_PATH}/Contents/Resources"
+        mkdir -p "${RESOURCES_DIR}"
+
+        for dir in music Common/Media Common/res Common/Trial Common/Tutorial; do
+          if [ -d "Minecraft.Client/${dir}" ]; then
+            mkdir -p "${RESOURCES_DIR}/${dir}"
+            rsync -a --exclude='*.cpp' --exclude='*.h' --exclude='*.swf' \
+              "Minecraft.Client/${dir}/" "${RESOURCES_DIR}/${dir}/" || true
+          fi
+        done
+
+        if [ -d "Minecraft.Client/Windows64Media" ]; then
+          mkdir -p "${RESOURCES_DIR}/Windows64Media"
+          rsync -a "Minecraft.Client/Windows64Media/" "${RESOURCES_DIR}/Windows64Media/" || true
+        fi
+
+        # Copy Metal shader library
+        METALLIB=$(find build/macos-arm64 -name "default.metallib" | head -1)
+        if [ -n "$METALLIB" ]; then
+          cp "$METALLIB" "${RESOURCES_DIR}/default.metallib"
+        fi
+
+        echo "=== .app contents ==="
+        ls -la "$APP_PATH/Contents/" || true
+        ls -la "$APP_PATH/Contents/MacOS/" || true
+
+        # Create zip
+        cd "$(dirname "$APP_PATH")"
+        zip -r -q "${GITHUB_WORKSPACE}/LCEmacOS.zip" "$(basename "$APP_PATH")"
+        echo "=== Package created ==="
+        ls -la "${GITHUB_WORKSPACE}/LCEmacOS.zip"
+
+    - name: Stage artifacts
+      run: |
+        mkdir -p staging
+        cp LCEmacOS.zip staging/
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-macOS
+        path: staging/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+        merge-multiple: true
+
+    - name: Update release
+      uses: andelf/nightly-release@main
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: nightly-macos
+        name: Nightly macOS Release
+        body: |
+          macOS build of Minecraft Legacy Console Edition.
+          Requires macOS 13.0+ with Apple Silicon or Intel (Universal Binary).
+
+          ## Installation
+          1. Download `LCEmacOS.zip`
+          2. Extract the zip file
+          3. Right-click `Minecraft.Client.app` and select "Open" (first time only, to bypass Gatekeeper)
+
+          ## Controller Support
+          MFi, PlayStation (DualShock/DualSense), and Xbox controllers are supported natively.
+        files: |
+          artifacts/*
+
+  cleanup:
+    needs: [build, release]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+    - name: Cleanup artifacts
+      uses: geekyeggo/delete-artifact@v5
+      with:
+        name: build-*

@@ -8,6 +8,12 @@
       "hidden": true
     },
     {
+      "name": "base-apple",
+      "generator": "Xcode",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "hidden": true
+    },
+    {
       "name": "windows64",
       "displayName": "Windows64",
       "inherits": "base",
@@ -15,6 +21,73 @@
         "PLATFORM_DEFINES": "_WINDOWS64",
         "PLATFORM_NAME": "Windows64",
         "IGGY_LIBS": "iggy_w64.lib;iggyperfmon_w64.lib;iggyexpruntime_w64.lib"
+      }
+    },
+    {
+      "name": "macos",
+      "displayName": "macOS",
+      "inherits": "base-apple",
+      "cacheVariables": {
+        "PLATFORM_DEFINES": "_APPLE_PLATFORM;_MACOS",
+        "PLATFORM_NAME": "macOS",
+        "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "13.0"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "macos-arm64",
+      "displayName": "macOS (ARM64 only)",
+      "inherits": "base-apple",
+      "cacheVariables": {
+        "PLATFORM_DEFINES": "_APPLE_PLATFORM;_MACOS",
+        "PLATFORM_NAME": "macOS",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "13.0"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "ios",
+      "displayName": "iOS",
+      "inherits": "base-apple",
+      "cacheVariables": {
+        "PLATFORM_DEFINES": "_APPLE_PLATFORM;_IOS",
+        "PLATFORM_NAME": "iOS",
+        "CMAKE_SYSTEM_NAME": "iOS",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "15.0"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "ios-simulator",
+      "displayName": "iOS Simulator",
+      "inherits": "base-apple",
+      "cacheVariables": {
+        "PLATFORM_DEFINES": "_APPLE_PLATFORM;_IOS;_IOS_SIMULATOR",
+        "PLATFORM_NAME": "iOS",
+        "CMAKE_SYSTEM_NAME": "iOS",
+        "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "15.0",
+        "CMAKE_OSX_SYSROOT": "iphonesimulator"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
       }
     },
     {
@@ -75,6 +148,15 @@
   "buildPresets": [
     { "name": "windows64-debug",   "displayName": "Windows64 - Debug",   "configurePreset": "windows64", "configuration": "Debug" },
     { "name": "windows64-release", "displayName": "Windows64 - Release", "configurePreset": "windows64", "configuration": "Release" },
+
+    { "name": "macos-debug",       "displayName": "macOS - Debug",       "configurePreset": "macos",     "configuration": "Debug" },
+    { "name": "macos-release",     "displayName": "macOS - Release",     "configurePreset": "macos",     "configuration": "Release" },
+    { "name": "macos-arm64-debug", "displayName": "macOS ARM64 - Debug", "configurePreset": "macos-arm64", "configuration": "Debug" },
+    { "name": "macos-arm64-release","displayName": "macOS ARM64 - Release","configurePreset": "macos-arm64","configuration": "Release" },
+
+    { "name": "ios-debug",         "displayName": "iOS - Debug",         "configurePreset": "ios",       "configuration": "Debug" },
+    { "name": "ios-release",       "displayName": "iOS - Release",       "configurePreset": "ios",       "configuration": "Release" },
+    { "name": "ios-simulator-debug","displayName": "iOS Sim - Debug",    "configurePreset": "ios-simulator","configuration": "Debug" },
 
     { "name": "durango-debug",     "displayName": "Durango - Debug",     "configurePreset": "durango",   "configuration": "Debug" },
     { "name": "durango-release",   "displayName": "Durango - Release",   "configurePreset": "durango",   "configuration": "Release" },

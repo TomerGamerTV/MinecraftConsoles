@@ -25,6 +25,17 @@ target_compile_definitions(Minecraft.World PRIVATE
   ${MINECRAFT_SHARED_DEFINES}
   _LIB
 )
-target_precompile_headers(Minecraft.World PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:stdafx.h>")
+# Apple doesn't use MSVC-style precompiled headers with the Windows stdafx.h
+if(NOT APPLE)
+  target_precompile_headers(Minecraft.World PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:stdafx.h>")
+endif()
+
+# Apple needs the compatibility headers
+if(APPLE)
+  target_include_directories(Minecraft.World PRIVATE
+    "${CMAKE_SOURCE_DIR}/Minecraft.Client/Apple"
+    "${CMAKE_SOURCE_DIR}/Minecraft.Client/Apple/4JLibs/inc"
+  )
+endif()
 
 configure_compiler_target(Minecraft.World)

@@ -1,15 +1,25 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(MinecraftConsoles LANGUAGES C CXX RC ASM_MASM)
+# Apple platforms need OBJCXX language support
+if(APPLE)
+  project(MinecraftConsoles LANGUAGES C CXX OBJC OBJCXX)
+else()
+  project(MinecraftConsoles LANGUAGES C CXX RC ASM_MASM)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if(NOT WIN32)
-  message(FATAL_ERROR "This CMake build currently supports Windows only.")
+if(APPLE)
+  set(CMAKE_OBJCXX_STANDARD 17)
+  set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+  set(CMAKE_OBJCXX_EXTENSIONS OFF)
+elseif(NOT WIN32)
+  message(FATAL_ERROR "This CMake build currently supports Windows and Apple platforms only.")
 endif()
 
-if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+if(NOT APPLE AND NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "Use a 64-bit generator/toolchain (x64).")
 endif()
 
@@ -18,7 +28,10 @@ set(CMAKE_CONFIGURATION_TYPES
   "Release"
   CACHE STRING "" FORCE
 )
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+if(NOT APPLE)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 function(configure_compiler_target target)
   # MSVC and compatible compilers (like Clang-cl)
@@ -46,15 +59,33 @@ function(configure_compiler_target target)
     )
   endif()
 
-  # Clang
-  if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  # Clang (native, not Clang-cl) - used on Apple platforms
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
     target_compile_options(${target} PRIVATE
-      $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:C,CXX>>:-O0 -Wall>
-      $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:-O2 -w -flto>
+      $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>>:-O0 -Wall>
+      $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>>:-O2 -w -flto>
     )
     target_link_options(${target} PRIVATE
       $<$<CONFIG:Release>:-flto>
     )
+    if(APPLE)
+      # Suppress warnings for Windows-centric code patterns
+      target_compile_options(${target} PRIVATE
+        -Wno-reorder
+        -Wno-unused-variable
+        -Wno-unused-function
+        -Wno-unused-private-field
+        -Wno-sign-compare
+        -Wno-microsoft-include
+        -Wno-nonportable-include-path
+        -Wno-writable-strings
+        -Wno-format
+        -Wno-deprecated-declarations
+        -Wno-inconsistent-missing-override
+        -fexceptions
+        -frtti
+      )
+    endif()
   endif()
 endfunction()
 
@@ -66,9 +97,15 @@ set(MINECRAFT_SHARED_DEFINES
   _LARGE_WORLDS
   _DEBUG_MENUS_ENABLED
   $<$<CONFIG:Debug>:_DEBUG>
-  _CRT_NON_CONFORMING_SWPRINTFS
-  _CRT_SECURE_NO_WARNINGS
 )
+
+# Windows-specific CRT defines
+if(NOT APPLE)
+  list(APPEND MINECRAFT_SHARED_DEFINES
+    _CRT_NON_CONFORMING_SWPRINTFS
+    _CRT_SECURE_NO_WARNINGS
+  )
+endif()
 
 # Add platform-specific defines
 list(APPEND MINECRAFT_SHARED_DEFINES ${PLATFORM_DEFINES})
@@ -105,8 +142,10 @@ endif()
 # ---
 # Project organisation
 # ---
-# Set the startup project for Visual Studio
-set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT Minecraft.Client)
+if(NOT APPLE)
+  # Set the startup project for Visual Studio
+  set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT Minecraft.Client)
+endif()
 
 # Setup folders for Visual Studio, just hides the build targets under a sub folder
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)

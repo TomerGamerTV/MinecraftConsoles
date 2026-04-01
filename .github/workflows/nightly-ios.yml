@@ -1,0 +1,167 @@
+name: Nightly iOS Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+    - 'main'
+    paths:
+      - '**'
+      - '!.gitignore'
+      - '!*.md'
+      - '!.github/**'
+      - '.github/workflows/nightly-ios.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-ios
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-14  # Apple Silicon runner
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup CMake
+      uses: lukka/get-cmake@latest
+
+    - name: Print Environment Info
+      run: |
+        echo "=== System Info ==="
+        uname -a
+        sw_vers
+        echo "=== Xcode Version ==="
+        xcodebuild -version
+        echo "=== Available SDKs ==="
+        xcodebuild -showsdks
+        echo "=== CMake Version ==="
+        cmake --version
+
+    - name: Configure CMake (iOS)
+      run: |
+        echo "::group::CMake Configure"
+        cmake --preset ios 2>&1
+        echo "::endgroup::"
+
+    - name: Build iOS Client (Release)
+      run: |
+        echo "::group::CMake Build"
+        cmake --build --preset ios-release \
+          --target Minecraft.Client \
+          -- -allowProvisioningUpdates \
+             CODE_SIGN_IDENTITY="-" \
+             CODE_SIGNING_ALLOWED="NO" \
+             CODE_SIGNING_REQUIRED="NO" 2>&1
+        echo "::endgroup::"
+
+    - name: Package .ipa for sideloading
+      run: |
+        echo "=== Finding .app ==="
+        APP_PATH=$(find build/ios -name "Minecraft.Client.app" -type d | head -1)
+        echo "Found: $APP_PATH"
+
+        if [ -z "$APP_PATH" ]; then
+          echo "ERROR: .app bundle not found"
+          find build/ -type f -name "Minecraft.Client*" || true
+          exit 1
+        fi
+
+        # Copy game assets into the app bundle
+        for dir in music Common/Media Common/res Common/Trial Common/Tutorial; do
+          if [ -d "Minecraft.Client/${dir}" ]; then
+            mkdir -p "${APP_PATH}/${dir}"
+            rsync -a --exclude='*.cpp' --exclude='*.h' --exclude='*.swf' \
+              "Minecraft.Client/${dir}/" "${APP_PATH}/${dir}/" || true
+          fi
+        done
+
+        if [ -d "Minecraft.Client/Windows64Media" ]; then
+          mkdir -p "${APP_PATH}/Windows64Media"
+          rsync -a "Minecraft.Client/Windows64Media/" "${APP_PATH}/Windows64Media/" || true
+        fi
+
+        # Copy Metal shader library
+        METALLIB=$(find build/ios -name "default.metallib" | head -1)
+        if [ -n "$METALLIB" ]; then
+          cp "$METALLIB" "${APP_PATH}/default.metallib"
+        fi
+
+        echo "=== .app contents ==="
+        ls -la "$APP_PATH/" || true
+
+        # Create .ipa (Payload/App.app structure)
+        mkdir -p ipa_staging/Payload
+        cp -r "$APP_PATH" ipa_staging/Payload/
+        cd ipa_staging
+        zip -r -q "${GITHUB_WORKSPACE}/MinecraftLCE-iOS.ipa" Payload/
+        cd "${GITHUB_WORKSPACE}"
+        rm -rf ipa_staging
+
+        echo "=== .ipa created ==="
+        ls -la MinecraftLCE-iOS.ipa
+
+    - name: Stage artifacts
+      run: |
+        mkdir -p staging
+        cp MinecraftLCE-iOS.ipa staging/
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-iOS
+        path: staging/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+        merge-multiple: true
+
+    - name: Update release
+      uses: andelf/nightly-release@main
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: nightly-ios
+        name: Nightly iOS Release
+        body: |
+          iOS build of Minecraft Legacy Console Edition.
+          Requires iOS 15.0+ on iPhone or iPad with A12 chip or later.
+
+          ## Sideloading
+          The `.ipa` file can be sideloaded using:
+          - **AltStore** (recommended)
+          - **Sideloadly**
+          - **Apple Configurator 2**
+          - **TrollStore** (if available for your iOS version)
+
+          ## Controller Support
+          MFi, PlayStation (DualShock/DualSense), and Xbox controllers are fully supported.
+          Touch controls with virtual joystick are also available.
+
+          ## Notes
+          - The app supports Dynamic Island and notch safe areas
+          - Landscape orientation is enforced
+          - JIT may be required for optimal performance (use AltStore + JIT enabler)
+        files: |
+          artifacts/*
+
+  cleanup:
+    needs: [build, release]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+    - name: Cleanup artifacts
+      uses: geekyeggo/delete-artifact@v5
+      with:
+        name: build-*
