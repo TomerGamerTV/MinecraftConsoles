@@ -3,7 +3,7 @@
 # Usage: ./build_macos.sh [debug|release] [arm64|universal]
 # Requires: Xcode command-line tools (xcode-select --install)
 
-set -euo pipefail
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_TYPE="${1:-release}"
@@ -48,10 +48,42 @@ if [ "$BUILD_TYPE" = "debug" ]; then
     BUILD_CONFIG="Debug"
 fi
 
+BUILD_LOG="${SCRIPT_DIR}/build/${PRESET}/build.log"
+ERROR_LOG="${SCRIPT_DIR}/build/${PRESET}/build_errors.log"
+
 cmake --build --preset "${PRESET}-${BUILD_TYPE}" \
     --target Minecraft.Client \
     -- -allowProvisioningUpdates \
-    2>&1 | tee "${SCRIPT_DIR}/build/${PRESET}/build.log"
+    2>&1 | tee "${BUILD_LOG}"
+
+BUILD_EXIT=${PIPESTATUS[0]}
+
+# If build failed, extract errors into a dedicated log file with hash
+if [ $BUILD_EXIT -ne 0 ]; then
+    # Extract only lines with "error:" and the failed commands summary
+    {
+        echo "=== BUILD ERRORS - $(date '+%Y-%m-%d %H:%M:%S') ==="
+        echo ""
+        grep -n "error:" "${BUILD_LOG}" || true
+        echo ""
+        echo "=== FAILED COMMANDS ==="
+        grep -A1 "The following build commands failed:" "${BUILD_LOG}" || true
+        grep "CompileC.*\.o " "${BUILD_LOG}" | grep -B1 "failures\)" || true
+        # Also grab the (N failures) line
+        grep "failures)" "${BUILD_LOG}" || true
+    } > "${ERROR_LOG}"
+
+    # Compute hash of error content (just the error lines, not timestamps)
+    ERROR_HASH=$(grep "error:" "${BUILD_LOG}" | shasum -a 256 | cut -c1-12)
+
+    echo ""
+    echo "============================================"
+    echo " BUILD FAILED"
+    echo " Error log: ${ERROR_LOG}"
+    echo " Error hash: ${ERROR_HASH}"
+    echo "============================================"
+    exit 1
+fi
 
 echo ""
 echo "[3/3] Packaging .app bundle..."

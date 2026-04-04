@@ -14,7 +14,16 @@
 #include <audioout.h>
 #endif
 
+#ifdef _WINDOWS64
 #include "../../Minecraft.Client/Windows64/Windows64_App.h"
+#endif
+
+// Temporarily undefine 'byte' macro to avoid conflicts with audio library
+// code that uses 'byte' as a variable/parameter name
+#ifdef _APPLE_PLATFORM
+#pragma push_macro("byte")
+#undef byte
+#endif
 
 #include "stb_vorbis.h"
 
@@ -22,6 +31,10 @@
 #define MA_NO_WINMM
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
+
+#ifdef _APPLE_PLATFORM
+#pragma pop_macro("byte")
+#endif
 #include <vector>
 #include <memory>
 #include <mutex>
@@ -100,6 +113,11 @@ char SoundEngine::m_szRedistName[]={"redist"};
 #else
 #include <sys/spu_image.h>
 #endif
+
+#elif defined _APPLE_PLATFORM
+char SoundEngine::m_szSoundPath[]={"Windows64Media/Sound/"};
+char SoundEngine::m_szMusicPath[]={"music/"};
+char SoundEngine::m_szRedistName[]={"redist64"};
 
 #endif
 

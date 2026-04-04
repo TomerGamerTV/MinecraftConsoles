@@ -5,8 +5,11 @@
 // UI elements: textured quads, vector shapes, text glyphs, blend modes,
 // and render-to-texture for filter effects.
 
+#include "stdafx.h"
+#define Component CarbonComponent_Renamed
 #import <Metal/Metal.h>
 #import <simd/simd.h>
+#undef Component
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>

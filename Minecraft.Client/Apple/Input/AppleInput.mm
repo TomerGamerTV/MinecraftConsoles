@@ -3,8 +3,14 @@
 // support MFi, DualShock 4, DualSense, and Xbox Wireless controllers.
 // Compiled as Objective-C++ (.mm).
 
+#include "stdafx.h"
+#define Component CarbonComponent_Renamed
 #import <Foundation/Foundation.h>
+#undef Component
 #import <GameController/GameController.h>
+#ifdef _MACOS
+#import <AppKit/AppKit.h>
+#endif
 #include <cstring>
 #include <cmath>
 #include <ctime>

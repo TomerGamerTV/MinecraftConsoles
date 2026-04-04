@@ -93,7 +93,11 @@ int Minecraft::frameTimePos = 0;
 int64_t Minecraft::warezTime = 0;
 File Minecraft::workDir = File(L"");
 
+#if defined(_APPLE_PLATFORM)
+extern Apple_UIController ui;
+#else
 extern ConsoleUIController ui;
+#endif
 
 #ifdef __PSVITA__
 

@@ -3,7 +3,10 @@
 // iOS:   uses GCKeyboard / GCMouse when available (iOS 14+).
 // Compiled as Objective-C++ (.mm).
 
+#include "stdafx.h"
+#define Component CarbonComponent_Renamed
 #import <Foundation/Foundation.h>
+#undef Component
 #include "AppleKeyboardMouseInput.h"
 #include <cstring>
 #include <cmath>

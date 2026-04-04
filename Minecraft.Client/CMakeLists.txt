@@ -57,6 +57,8 @@ elseif(PLATFORM_NAME STREQUAL "macOS")
     XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.lce.minecraft-console"
     MACOSX_BUNDLE_BUNDLE_NAME "Minecraft LCE"
     MACOSX_BUNDLE_GUI_IDENTIFIER "com.lce.minecraft-console"
+    XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "-"
+    XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
   )
 else()
   add_executable(Minecraft.Client ${MINECRAFT_CLIENT_SOURCES})
@@ -121,6 +123,7 @@ if(APPLE)
   find_library(COREAUDIO_FRAMEWORK CoreAudio REQUIRED)
   find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
   find_library(AVFOUNDATION_FRAMEWORK AVFoundation REQUIRED)
+  find_library(IMAGEIO_FRAMEWORK ImageIO REQUIRED)
 
   target_link_libraries(Minecraft.Client PRIVATE
     Minecraft.World
@@ -133,6 +136,7 @@ if(APPLE)
     ${COREAUDIO_FRAMEWORK}
     ${FOUNDATION_FRAMEWORK}
     ${AVFOUNDATION_FRAMEWORK}
+    ${IMAGEIO_FRAMEWORK}
   )
 
   if(PLATFORM_NAME STREQUAL "macOS")

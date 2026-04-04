@@ -111,6 +111,11 @@ C4JThread::C4JThread( C4JThreadStartFunc* startFunc, void* param, const char* th
 
 	m_threadID = sceKernelCreateThread(m_threadName, entryPoint, g_DefaultPriority, m_stackSize, 0, CPU, nullptr);
 	app.DebugPrintf("***************************** start thread %s **************************\n", m_threadName);
+#elif defined _APPLE_PLATFORM
+	m_completionFlag = new Event(Event::e_modeManualClear);
+	m_threadID = 0;
+	m_lastSleepTime = 0;
+	m_priority = 0;
 #else
 	m_threadID = 0;
 	m_threadHandle = 0;
@@ -159,6 +164,10 @@ C4JThread::C4JThread( const char* mainThreadName)
 	int err = sceKernelChangeThreadCpuAffinityMask(m_threadID, SCE_KERNEL_CPU_MASK_USER_0);
 //	sceKernelChangeThreadPriority(m_threadID, g_DefaultPriority + 1);
 	g_DefaultCPU = SCE_KERNEL_CPU_MASK_USER_ALL;//sceKernelGetThreadCpuAffinityMask(m_threadID);
+#elif defined _APPLE_PLATFORM
+	m_completionFlag = new Event(Event::e_modeManualClear);
+	m_threadID = pthread_self();
+	m_priority = 0;
 #else
 	m_threadID = GetCurrentThreadId();
 	m_threadHandle = GetCurrentThread();
@@ -173,12 +182,14 @@ C4JThread::C4JThread( const char* mainThreadName)
 
 C4JThread::~C4JThread()
 {
-#if defined __PS3__ || defined __ORBIS__ || defined __PSVITA__
+#if defined __PS3__ || defined __ORBIS__ || defined __PSVITA__ || defined _APPLE_PLATFORM
 	delete m_completionFlag;
 #endif
 
 #if defined __ORBIS__
 	scePthreadJoin(m_threadID, nullptr);
+#elif defined _APPLE_PLATFORM
+	pthread_join(m_threadID, nullptr);
 #endif
 
 	EnterCriticalSection(&ms_threadListCS);
@@ -237,6 +248,15 @@ SceInt32 C4JThread::entryPoint(SceSize argSize, void *pArgBlock)
 
 	return pThread->m_exitCode;
 }
+#elif defined _APPLE_PLATFORM
+void * C4JThread::entryPoint(void *param)
+{
+	C4JThread* pThread = (C4JThread*)param;
+	pThread->m_exitCode = (*pThread->m_startFunc)(pThread->m_threadParam);
+	pThread->m_completionFlag->Set();
+	pThread->m_isRunning = false;
+	return nullptr;
+}
 #else
 DWORD WINAPI	C4JThread::entryPoint(LPVOID lpParam)
 {
@@ -272,6 +292,12 @@ void C4JThread::Run()
 	StrArg strArg = {this};
 //	m_threadID = sceKernelCreateThread(m_threadName, entryPoint, m_priority, m_stackSize, 0, m_CPUMask, nullptr);
 	sceKernelStartThread( m_threadID, sizeof(strArg), &strArg);
+#elif defined _APPLE_PLATFORM
+	pthread_attr_t attr;
+	pthread_attr_init(&attr);
+	if (m_stackSize > 0) pthread_attr_setstacksize(&attr, m_stackSize);
+	pthread_create(&m_threadID, &attr, entryPoint, this);
+	pthread_attr_destroy(&attr);
 #else
 	ResumeThread(m_threadHandle);
 #endif
@@ -295,6 +321,8 @@ void C4JThread::SetProcessor( int proc )
 	app.DebugPrintf("***************************** set thread proc %s %d %d %d **************************\n", m_threadName, proc, Mask, Newmask);
 #elif defined _DURANGO
 	SetThreadAffinityMask(m_threadHandle, 1 << proc );
+#elif defined _APPLE_PLATFORM
+	// Thread affinity not directly supported on macOS/iOS - no-op
 #else
 	XSetThreadProcessor( m_threadHandle, proc);
 #endif
@@ -352,6 +380,9 @@ void C4JThread::SetPriority( int priority )
 
 //	sceKernelChangeThreadPriority(m_threadID, m_priority);
 	app.DebugPrintf("***************************** set thread prio %s %d %d **************************\n", m_threadName, priority, m_priority);
+#elif defined _APPLE_PLATFORM
+	// Thread priority not directly portable on macOS/iOS - store for reference
+	m_priority = priority;
 #else
 	SetThreadPriority(m_threadHandle, priority);
 #endif // __PS3__
@@ -387,6 +418,8 @@ DWORD C4JThread::WaitForCompletion( int timeoutMs )
 	}*/
 
 //	return m_exitCode;
+#elif defined _APPLE_PLATFORM
+	return m_completionFlag->WaitForSignal( timeoutMs );
 #else
 	return WaitForSingleObject(m_threadHandle, timeoutMs);
 #endif // __PS3__
@@ -394,7 +427,7 @@ DWORD C4JThread::WaitForCompletion( int timeoutMs )
 
 int C4JThread::GetExitCode()
 {
-#if defined  __PS3__ || defined __ORBIS__ || defined __PSVITA__
+#if defined  __PS3__ || defined __ORBIS__ || defined __PSVITA__ || defined _APPLE_PLATFORM
 	return m_exitCode;
 #else
 	DWORD exitcode = 0;
@@ -434,6 +467,8 @@ C4JThread* C4JThread::getCurrentThread()
 	ScePthread currThreadID = scePthreadSelf();
 #elif defined __PSVITA__
 	SceUID currThreadID = sceKernelGetThreadId();
+#elif defined _APPLE_PLATFORM
+	pthread_t currThreadID = pthread_self();
 #else
 	DWORD currThreadID = GetCurrentThreadId();
 #endif //__PS3__

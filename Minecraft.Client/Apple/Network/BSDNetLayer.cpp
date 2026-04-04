@@ -4,7 +4,13 @@
 
 #if defined(__APPLE__)
 
+#include "stdafx.h"
 #include "BSDNetLayer.h"
+
+// Avoid conflict with std::bind from 'using namespace std'
+// POSIX bind() for sockets gets shadowed - use global scope
+#undef bind
+#define bsd_bind(s, a, l) ::bind(s, a, l)
 
 #include <sys/socket.h>
 #include <sys/select.h>
@@ -90,7 +96,7 @@ volatile bool        BSDNetLayer::s_joinCancel         = false;
 char                 BSDNetLayer::s_joinIP[256]        = {};
 int                  BSDNetLayer::s_joinPort           = 0;
 uint8_t              BSDNetLayer::s_joinAssignedSmallId = 0;
-DisconnectPacket::eDisconnectReason BSDNetLayer::s_joinRejectReason = DisconnectPacket::eDisconnectReason_Generic;
+DisconnectPacket::eDisconnectReason BSDNetLayer::s_joinRejectReason = DisconnectPacket::eDisconnect_None;
 
 // Multiplayer launch flags
 bool g_AppleMultiplayerHost = false;
@@ -205,7 +211,7 @@ bool BSDNetLayer::HostGame(int port, const char* bindIp)
     else
         addr.sin_addr.s_addr = INADDR_ANY;
 
-    if (bind(s_listenSocket, (struct sockaddr*)&addr, sizeof(addr)) < 0)
+    if (::bind(s_listenSocket, (struct sockaddr*)&addr, sizeof(addr)) < 0)
     {
         printf("[BSDNet] bind() failed on port %d: %s\n", port, strerror(errno));
         close(s_listenSocket);
@@ -795,7 +801,7 @@ bool BSDNetLayer::StartDiscovery()
     addr.sin_port        = htons(APPLE_LAN_DISCOVERY_PORT);
     addr.sin_addr.s_addr = INADDR_ANY;
 
-    if (bind(s_discoverySock, (struct sockaddr*)&addr, sizeof(addr)) < 0)
+    if (::bind(s_discoverySock, (struct sockaddr*)&addr, sizeof(addr)) < 0)
     {
         printf("[BSDNet] Discovery bind() failed: %s\n", strerror(errno));
         close(s_discoverySock);

@@ -7,6 +7,7 @@
 //
 // In debug builds, each stub logs its call for tracing and debugging.
 
+#include "stdafx.h"
 #include "include/iggy.h"
 #include "include/iggyexpruntime.h"
 #include "include/iggyperfmon.h"
@@ -888,4 +889,12 @@ void IggyPerfmonDestroy(HIGGYPERFMON p, GDrawFunctions *iggy_draw)
 {
     IGGY_STUB_LOG("IggyPerfmonDestroy");
     (void)p; (void)iggy_draw;
+}
+
+rrbool IggyDebugGetMemoryUseInfo(Iggy *player, IggyLibrary lib, char const *category_string, S32 category_stringlen, S32 iteration, IggyMemoryUseInfo *data)
+{
+    IGGY_STUB_LOG("IggyDebugGetMemoryUseInfo");
+    (void)player; (void)lib; (void)category_string; (void)category_stringlen; (void)iteration;
+    if (data) memset(data, 0, sizeof(IggyMemoryUseInfo));
+    return 0;
 }

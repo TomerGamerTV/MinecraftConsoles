@@ -161,6 +161,9 @@ public:
     void            CancelQueuedVerifyStrings(int (*Func)(void *, STRING_VERIFY_RESPONSE *),
                                               void *lpParam);
     void            CancelAllVerifyInProgress(void);
+
+    // Debug sequence (stub on Apple)
+    void            SetDebugSequence(const char* pchSeq, int (*Func)(void*), void* lpParam) {}
 };
 
 // Singleton

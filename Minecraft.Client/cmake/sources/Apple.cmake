@@ -298,6 +298,7 @@ set(_MINECRAFT_CLIENT_APPLE_PLATFORM
   "${BASE_DIR}/AppleTypes.h"
   "${BASE_DIR}/AppleMaths.h"
   "${BASE_DIR}/Apple_App.h"
+  "${BASE_DIR}/Apple_App.cpp"
 )
 source_group("Apple" FILES ${_MINECRAFT_CLIENT_APPLE_PLATFORM})
 
@@ -398,8 +399,7 @@ set(_MINECRAFT_CLIENT_APPLE_STATS
 source_group("Stats" FILES ${_MINECRAFT_CLIENT_APPLE_STATS})
 
 set(_MINECRAFT_CLIENT_APPLE_LEADERBOARDS
-  "${CMAKE_CURRENT_SOURCE_DIR}/Windows64/Leaderboards/WindowsLeaderboardManager.cpp"
-  "${CMAKE_CURRENT_SOURCE_DIR}/Windows64/Leaderboards/WindowsLeaderboardManager.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/Apple/Leaderboards/AppleLeaderboardManager.h"
 )
 source_group("Leaderboards" FILES ${_MINECRAFT_CLIENT_APPLE_LEADERBOARDS})
 

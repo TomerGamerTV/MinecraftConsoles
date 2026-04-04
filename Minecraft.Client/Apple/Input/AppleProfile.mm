@@ -4,7 +4,12 @@
 // The primary player is always signed in as a local user.
 // Compiled as Objective-C++ (.mm).
 
+#include "stdafx.h"
+// Workaround: CarbonCore defines 'Component' which conflicts with a game type
+// Rename it before Foundation pulls in CarbonCore
+#define Component CarbonComponent_Renamed
 #import <Foundation/Foundation.h>
+#undef Component
 #include "../4JLibs/inc/4J_Profile.h"
 #include <cstring>
 #include <cstdlib>

@@ -125,4 +125,8 @@
 #include "UIScene_EULA.h"
 #include "UIScene_NewUpdateMessage.h"
 
+#if defined(_APPLE_PLATFORM)
+extern Apple_UIController ui;
+#else
 extern ConsoleUIController ui;
+#endif

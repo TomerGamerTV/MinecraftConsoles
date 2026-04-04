@@ -75,7 +75,7 @@ typedef struct
     DWORD   dwOfferType;
     WCHAR   wszDisplayName[XCONTENT_MAX_DISPLAYNAME_LENGTH];
     char    szFileName[XCONTENT_MAX_FILENAME_LENGTH];
-    uint64_t ullOfferID;
+    uint64_t qwOfferID;
 }
 XMARKETPLACE_CONTENTOFFER_INFO, *PXMARKETPLACE_CONTENTOFFER_INFO;
 

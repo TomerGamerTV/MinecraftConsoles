@@ -2,9 +2,13 @@
 // Provides the full C4JRender API using Metal instead of D3D11.
 // Uses simd types for matrix math, MTLDevice/MTLCommandQueue for GPU work.
 
+#include "stdafx.h"
+#define Component CarbonComponent_Renamed
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <ImageIO/ImageIO.h>
 #import <simd/simd.h>
+#undef Component
 #import <vector>
 #import <stack>
 #import <cstring>
@@ -225,7 +229,7 @@ static simd_float4x4 make_identity_matrix()
 // ------------------------------------------------------------------
 // Helper: multiply two 4x4 matrices
 // ------------------------------------------------------------------
-static simd_float4x4 matrix_multiply(simd_float4x4 a, simd_float4x4 b)
+static simd_float4x4 lce_matrix_multiply(simd_float4x4 a, simd_float4x4 b)
 {
     return simd_mul(a, b);
 }

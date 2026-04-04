@@ -5,7 +5,10 @@
 // DLC:   mounted from local directories on disk.
 // Compiled as Objective-C++ (.mm).
 
+#include "stdafx.h"
+#define Component CarbonComponent_Renamed
 #import <Foundation/Foundation.h>
+#undef Component
 #include "../4JLibs/inc/4J_Storage.h"
 #include <cstring>
 #include <cstdlib>

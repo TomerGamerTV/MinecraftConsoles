@@ -1,5 +1,9 @@
 #include "stdafx.h"
+#ifdef _APPLE_PLATFORM
+#include <functional>
+#else
 #include <xhash>
+#endif
 
 #include "Hasher.h"
 

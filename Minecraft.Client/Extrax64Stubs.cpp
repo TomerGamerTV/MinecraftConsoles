@@ -43,7 +43,7 @@
 #endif
 
 #if !defined(__PS3__) && !defined(__ORBIS__) && !defined(__PSVITA__)
-#if defined(_WINDOWS64) || defined(_APPLE_PLATFORM)
+#if defined(_WINDOWS64)
 //C4JStorage StorageManager;
 C_4JProfile ProfileManager;
 #endif
@@ -74,7 +74,7 @@ DWORD XContentGetThumbnail(DWORD dwUserIndex, const XCONTENT_DATA* pContentData,
 void XShowAchievementsUI(int i) {}
 DWORD XBackgroundDownloadSetMode(XBACKGROUND_DOWNLOAD_MODE Mode) { return 0; }
 
-#if !defined(_DURANGO) && !defined(_WIN64)
+#if !defined(_DURANGO) && !defined(_WIN64) && !defined(_APPLE_PLATFORM)
 void PIXAddNamedCounter(int a, const char* b, ...) {}
 //#define PS3_USE_PIX_EVENTS 
 //#define PS4_USE_PIX_EVENTS 
@@ -573,7 +573,7 @@ DWORD XEnableGuestSignin(BOOL fEnable) { return 0; }
 
 
 /////////////////////////////////////////////// Profile library
-#if defined(_WINDOWS64) || defined(_APPLE_PLATFORM)
+#if defined(_WINDOWS64)
 static void* profileData[4];
 static bool s_bProfileIsFullVersion;
 void				C_4JProfile::Initialise(DWORD dwTitleID,

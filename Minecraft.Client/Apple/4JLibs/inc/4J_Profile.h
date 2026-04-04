@@ -8,15 +8,31 @@
 #include "../../AppleTypes.h"
 #include <string>
 
-// ---------------------------------------------------------------------------
-// Forward declarations
-// ---------------------------------------------------------------------------
-class C4JStringTable;
+// PlayerUID - defined in extraX64.h but needed here for .mm files
+// that don't include the full stdafx.h chain
+#ifndef _PLAYERUID_DEFINED
+typedef unsigned long long PlayerUID;
+typedef PlayerUID* PPlayerUID;
+#define _PLAYERUID_DEFINED
+#endif
 
-// CXuiStringTable stub - Xbox UI string table does not exist on Apple
+// ---------------------------------------------------------------------------
+// C4JStringTable - stub string table for Apple
+// ---------------------------------------------------------------------------
+class C4JStringTable {
+public:
+    LPCWSTR Lookup(LPCWSTR szId);
+    LPCWSTR Lookup(UINT nIndex);
+    void Clear();
+    HRESULT Load(LPCWSTR szId);
+};
+
+// CXuiStringTable stub - maps to C4JStringTable on Apple
+// (extraX64.h's CXuiStringTable class is guarded with #ifndef _APPLE_PLATFORM)
 typedef C4JStringTable CXuiStringTable;
 
-// PlayerUID - simple wrapper on Apple (no Xbox Live XUID)
+// PlayerUID - defined as typedef ULONGLONG in extraX64.h, no need to redefine here
+#if 0
 class PlayerUID
 {
 public:
@@ -32,6 +48,7 @@ public:
 };
 
 typedef PlayerUID *PPlayerUID;
+#endif
 
 // Xbox compat constant
 #ifndef XUSER_INDEX_ANY

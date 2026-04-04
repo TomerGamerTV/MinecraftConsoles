@@ -267,7 +267,7 @@ void UIScene_AbstractContainerMenu::getMouseToSWFScale(float &scaleX, float &sca
 	if(winW <= 0 || winH <= 0) { scaleX = 1.0f; scaleY = 1.0f; return; }
 
 	S32 renderW, renderH;
-	C4JRender::eViewportType vp = GetParentLayer()->getViewport();
+	C4JRender::eViewportType vp = this->GetParentLayer()->getViewport();
 	ui.getRenderDimensions(vp, renderW, renderH);
 	if(vp != C4JRender::VIEWPORT_TYPE_FULLSCREEN)
 		Fit16x9(renderW, renderH);

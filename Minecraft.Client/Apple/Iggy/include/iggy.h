@@ -100,7 +100,8 @@ typedef enum IggyDatatype
 } IggyDatatype;
 
 // On Apple we use unsigned short for UTF16 characters
-typedef unsigned short IggyUTF16;
+// On Apple, wchar_t is 32-bit. Use wchar_t so casts to wchar_t* work.
+typedef wchar_t IggyUTF16;
 
 typedef struct IggyStringUTF16
 {
@@ -1065,6 +1066,19 @@ RADEXPFUNC S32 RADEXPLINK IggyPlayerCopyUTF8(Iggy *f, char *buffer, S32 bufferle
 // IME stubs (not used on Apple but declared for API compatibility)
 RADEXPFUNC void RADEXPLINK IggyPlayerSetIMEFontUTF8(Iggy *f, const char *font_name_utf8, S32 namelen_in_bytes);
 RADEXPFUNC void RADEXPLINK IggyPlayerSetIMEFontUTF16(Iggy *f, const IggyUTF16 *font_name_utf16, S32 namelen_in_2byte_words);
+
+// Memory debug info (stub struct for API compatibility)
+typedef struct
+{
+   char *subcategory;
+   S32   subcategory_stringlen;
+   S32   static_allocation_count;
+   S32   static_allocation_bytes;
+   S32   dynamic_allocation_count;
+   S32   dynamic_allocation_bytes;
+} IggyMemoryUseInfo;
+
+RADEXPFUNC rrbool RADEXPLINK IggyDebugGetMemoryUseInfo(Iggy *player, IggyLibrary lib, char const *category_string, S32 category_stringlen, S32 iteration, IggyMemoryUseInfo *data);
 
 RADDEFEND
 

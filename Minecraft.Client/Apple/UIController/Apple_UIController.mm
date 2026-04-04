@@ -2,7 +2,10 @@
 // Stub implementation. Once GDraw Metal is available, this mirrors
 // Windows64_UIController.cpp but uses gdraw_Metal_* calls.
 
+#include "stdafx.h"
+#define Component CarbonComponent_Renamed
 #import <Metal/Metal.h>
+#undef Component
 
 #include "Apple_UIController.h"
 

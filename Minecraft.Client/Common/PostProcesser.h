@@ -1,6 +1,8 @@
 #pragma once
 
+#ifndef _APPLE_PLATFORM
 #include <d3d11.h>
+#endif
 
 class PostProcesser
 {
@@ -15,8 +17,8 @@ public:
     void Apply() const;
     void SetViewport(const D3D11_VIEWPORT& viewport);
     void ResetViewport();
-    void CopyBackbuffer(); // Copy backbuffer once before multi-pass gamma
-    void ApplyFromCopied() const; // Apply gamma using already-copied offscreen texture
+    void CopyBackbuffer();
+    void ApplyFromCopied() const;
     void Cleanup();
     void SetGamma(float gamma);
     float GetGamma() const { return m_gamma; }
@@ -29,6 +31,7 @@ private:
 
     static bool IsRunningUnderWine();
 
+#ifndef _APPLE_PLATFORM
     ID3D11Texture2D* m_pGammaOffscreenTex = nullptr;
     ID3D11ShaderResourceView* m_pGammaOffscreenSRV = nullptr;
     ID3D11RenderTargetView* m_pGammaOffscreenRTV = nullptr;
@@ -39,6 +42,7 @@ private:
     ID3D11RasterizerState* m_pGammaRastState = nullptr;
     ID3D11DepthStencilState* m_pGammaDepthState = nullptr;
     ID3D11BlendState* m_pGammaBlendState = nullptr;
+#endif
 
     bool m_initialized = false;
     float m_gamma = 1.0f;

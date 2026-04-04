@@ -56,7 +56,11 @@
 #ifndef _DURANGO
 #include "../Minecraft.World/CommonStats.h"
 #endif
+#if defined(_APPLE_PLATFORM)
+extern Apple_UIController ui;
+#else
 extern ConsoleUIController ui;
+#endif
 
 
 LocalPlayer::LocalPlayer(Minecraft *minecraft, Level *level, User *user, int dimension) : Player(level, user->name)

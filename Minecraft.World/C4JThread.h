@@ -214,6 +214,11 @@ private:
 	Event			*m_completionFlag;
 	int				m_priority;
 	static SceInt32	entryPoint(SceSize argSize, void *pArgBlock);
+#elif defined _APPLE_PLATFORM
+	pthread_t	m_threadID;
+	Event			*m_completionFlag;
+	int				m_priority;
+	static void *entryPoint(void *);
 #else
 	DWORD m_threadID;
 	HANDLE m_threadHandle;

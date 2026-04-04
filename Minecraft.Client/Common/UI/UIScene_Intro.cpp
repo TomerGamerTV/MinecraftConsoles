@@ -34,6 +34,8 @@ UIScene_Intro::UIScene_Intro(int iPad, void *initData, UILayer *parentLayer) : U
 	int platformIdx = 4;
 #elif defined(__PSVITA__)
 	int platformIdx = 5;
+#elif defined(_APPLE_PLATFORM)
+	int platformIdx = 0; // Use Windows index for now
 #endif
 
 	IggyDataValue result;

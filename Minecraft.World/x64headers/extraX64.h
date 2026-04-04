@@ -11,7 +11,12 @@
 
 #define MULTITHREAD_ENABLE
 
+#ifdef _APPLE_PLATFORM
+// Use macro instead of typedef to avoid ambiguity with std::byte (C++17)
+#define byte unsigned char
+#else
 typedef unsigned char byte;
+#endif
 
 const int XUSER_INDEX_ANY = 255;
 const int XUSER_INDEX_FOCUS = 254;
@@ -361,7 +366,7 @@ const int XCONTENT_MAX_DISPLAYNAME_LENGTH = 256;
 const int XCONTENT_MAX_FILENAME_LENGTH = 256;
 typedef int XCONTENTDEVICEID;
 
-#if !defined( __PS3__) && !defined(__ORBIS__) && !defined(_DURANGO) && !defined(__PSVITA__)
+#if !defined( __PS3__) && !defined(__ORBIS__) && !defined(_DURANGO) && !defined(__PSVITA__) && !defined(_APPLE_PLATFORM)
 typedef struct _XCONTENT_DATA
 {
     XCONTENTDEVICEID DeviceID;
@@ -373,7 +378,7 @@ typedef struct _XCONTENT_DATA
 
 static const int XMARKETPLACE_CONTENT_ID_LEN = 4;
 
-#ifndef _DURANGO
+#if !defined(_DURANGO) && !defined(_APPLE_PLATFORM)
 typedef struct _XMARKETPLACE_CONTENTOFFER_INFO
 {
     ULONGLONG qwOfferID;
@@ -410,7 +415,7 @@ typedef enum
     XMARKETPLACE_OFFERING_TYPE_CONSUMABLE = 0x00010000,
     XMARKETPLACE_OFFERING_TYPE_AVATARITEM = 0x00100000
 } XMARKETPLACE_OFFERING_TYPE;
-#endif // _DURANGO
+#endif // !_DURANGO && !_APPLE_PLATFORM
 
 const int QNET_SENDDATA_RELIABLE = 0;
 const int QNET_SENDDATA_SEQUENTIAL = 0;
@@ -440,6 +445,7 @@ DWORD XUserGetSigninInfo(
          PXUSER_SIGNIN_INFO pSigninInfo
 );
 
+#ifndef _APPLE_PLATFORM
 class CXuiStringTable
 {
 public:
@@ -448,6 +454,7 @@ public:
 	void Clear();
 	HRESULT Load(LPCWSTR szId);
 };
+#endif // !_APPLE_PLATFORM
 
 #if !defined(__ORBIS__) && !defined(_XBOX_ONE)
 typedef VOID * XMEMDECOMPRESSION_CONTEXT;

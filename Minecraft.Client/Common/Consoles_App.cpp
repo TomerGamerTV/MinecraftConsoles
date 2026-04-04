@@ -25,7 +25,9 @@
 #include "../../Minecraft.World/SignTileEntity.h"
 #include "../StatsCounter.h"
 #include "../GameMode.h"
+#ifndef _APPLE_PLATFORM
 #include "../Xbox/Social/SocialManager.h"
+#endif
 #include "Tutorial/TutorialMode.h"
 #if defined _XBOX || defined _WINDOWS64
 #include "../Xbox/XML/ATGXmlParser.h"
@@ -2872,7 +2874,7 @@ void CMinecraftApp::HandleXuiActions(void)
 
 					LoadingInputParams *loadingParams = new LoadingInputParams();
 					loadingParams->func = &UIScene_PauseMenu::SaveWorldThreadProc;
-					loadingParams->lpParam = static_cast<LPVOID>(false);
+					loadingParams->lpParam = (LPVOID)(intptr_t)(false);
 
 					// 4J-JEV - PS4: Fix for #5708 - [ONLINE] - If the user pulls their network cable out while saving the title will hang.
 					loadingParams->waitForThreadToDelete = true;
@@ -5575,7 +5577,7 @@ void CMinecraftApp::HandleDLC(DLCPack *pack)
 {
 	DWORD dwFilesProcessed = 0;
 #ifndef _XBOX
-#if defined(__PS3__) || defined(__ORBIS__) || defined(_WINDOWS64) || defined (__PSVITA__)
+#if defined(__PS3__) || defined(__ORBIS__) || defined(_WINDOWS64) || defined (__PSVITA__) || defined(_APPLE_PLATFORM)
 	std::vector<std::string> dlcFilenames;
 #elif defined _DURANGO
 	std::vector<std::wstring> dlcFilenames;
@@ -7102,6 +7104,13 @@ HRESULT CMinecraftApp::RegisterDLCData(eDLCContentType eType, WCHAR *pwchBannerN
 	}
 	app.DebugPrintf("DLCInfo - type - %d, productID - %ls, name - %ls , banner - %ls, iconfig - %d, sort index - %d\n",eType,pwchProductId, pwchProductName,pwchBannerName, iConfig, uiSortIndex);
 	return hr;
+}
+#elif defined(_APPLE_PLATFORM)
+// Apple DLC stub - DLC registration not yet implemented
+HRESULT CMinecraftApp::RegisterDLCData(char *pchDLCName, unsigned int uiSortIndex, char *pchImageURL)
+{
+	app.DebugPrintf("RegisterDLCData stub: %s\n", pchDLCName);
+	return S_OK;
 }
 #else
 
