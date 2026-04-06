@@ -299,6 +299,9 @@ set(_MINECRAFT_CLIENT_APPLE_PLATFORM
   "${BASE_DIR}/AppleMaths.h"
   "${BASE_DIR}/Apple_App.h"
   "${BASE_DIR}/Apple_App.cpp"
+  "${BASE_DIR}/Extras/ShutdownManager.h"
+  "${BASE_DIR}/Extras/AppleMouseStub.cpp"
+  "${BASE_DIR}/Extras/AppleODRDefs.cpp"
 )
 source_group("Apple" FILES ${_MINECRAFT_CLIENT_APPLE_PLATFORM})
 

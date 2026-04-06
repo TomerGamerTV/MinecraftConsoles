@@ -63,10 +63,10 @@ function(configure_compiler_target target)
   if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
     target_compile_options(${target} PRIVATE
       $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>>:-O0 -Wall>
-      $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>>:-O2 -w -flto>
+      $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>>:-O2 -w>
     )
     target_link_options(${target} PRIVATE
-      $<$<CONFIG:Release>:-flto>
+      $<$<CONFIG:Release>:>
     )
     if(APPLE)
       # Suppress warnings for Windows-centric code patterns

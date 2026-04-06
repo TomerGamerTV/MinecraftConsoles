@@ -4433,11 +4433,26 @@ void CMinecraftApp::loadMediaArchive()
 	mediapath = L"Common\\Media\\MediaDurango.arc";
 #elif __PSVITA__
 	mediapath = L"Common\\Media\\MediaPSVita.arc";
+#elif _APPLE_PLATFORM
+	// Apple shares Windows64 media archive
+	// If it doesn't exist, game will run without archived assets
+	mediapath = L"Common/Media/MediaWindows64.arc";
 #endif
 
 	if (!mediapath.empty())
 	{
-		m_mediaArchive = new ArchiveFile( File(mediapath) );
+		File archiveFile(mediapath);
+		if (archiveFile.exists())
+		{
+			m_mediaArchive = new ArchiveFile( archiveFile );
+		}
+#ifdef _APPLE_PLATFORM
+		else
+		{
+			// Archive not found - this is expected if assets are loose files
+			m_mediaArchive = nullptr;
+		}
+#endif
 	}
 #if 0
 	string path = "Common\\media.arc";
@@ -4489,6 +4504,14 @@ void CMinecraftApp::loadStringTable()
 		// we need to unload the current string table, this is a reload
 		delete m_stringTable;
 	}
+
+	if (m_mediaArchive == nullptr)
+	{
+		// No archive loaded - create empty string table
+		m_stringTable = nullptr;
+		return;
+	}
+
 	wstring localisationFile = L"languages.loc";
 	if (m_mediaArchive->hasFile(localisationFile))
 	{
@@ -9484,7 +9507,8 @@ int CMinecraftApp::getArchiveFileSize(const wstring &filename)
 	{
 		return tPack->getArchiveFile()->getFileSize(filename);
 	}
-	else return m_mediaArchive->getFileSize(filename);
+	else if (m_mediaArchive) return m_mediaArchive->getFileSize(filename);
+	else return 0;
 }
 
 bool CMinecraftApp::hasArchiveFile(const wstring &filename)
@@ -9493,7 +9517,8 @@ bool CMinecraftApp::hasArchiveFile(const wstring &filename)
 	Minecraft *pMinecraft = Minecraft::GetInstance();
 	if(pMinecraft && pMinecraft->skins) tPack = pMinecraft->skins->getSelected();
 	if(tPack && tPack->hasData() && tPack->getArchiveFile() && tPack->getArchiveFile()->hasFile(filename)) return true;
-	else return m_mediaArchive->hasFile(filename);
+	else if (m_mediaArchive) return m_mediaArchive->hasFile(filename);
+	else return false;
 }
 
 byteArray CMinecraftApp::getArchiveFile(const wstring &filename)
@@ -9505,7 +9530,8 @@ byteArray CMinecraftApp::getArchiveFile(const wstring &filename)
 	{
 		return tPack->getArchiveFile()->getFile(filename);
 	}
-	else return m_mediaArchive->getFile(filename);
+	else if (m_mediaArchive) return m_mediaArchive->getFile(filename);
+	else { byteArray empty = {}; return empty; }
 }
 
 // DLC

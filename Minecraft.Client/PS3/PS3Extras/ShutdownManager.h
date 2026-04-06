@@ -1,5 +1,9 @@
 #pragma once
 
+#ifdef _APPLE_PLATFORM
+#include "../../Apple/Extras/ShutdownManager.h"
+#else
+
 class ShutdownManager
 {
 public:
@@ -45,3 +49,5 @@ private:
 	static void StorageManagerCompleteFn();
 #endif
 };
+
+#endif // _APPLE_PLATFORM

@@ -20,30 +20,23 @@ void Apple_UIController::init(void* metalDevice, void* metalCommandQueue,
                                void* colorTexture, void* depthStencilTexture,
                                S32 width, S32 height)
 {
-#ifdef _ENABLEIGGY
     m_metalDevice         = metalDevice;
     m_metalCommandQueue   = metalCommandQueue;
     m_colorTexture        = colorTexture;
     m_depthStencilTexture = depthStencilTexture;
 
-    // Shared base-class pre-init (sets screen dimensions, allocates groups)
+    // Base-class pre-init (sets screen dimensions, allocates UIGroups)
+    // This MUST be called even without Iggy - the tick/render code needs m_groups
     preInit(width, height);
 
+#ifdef _ENABLEIGGY
     // Create GDraw Metal context
-    // gdraw_funcs = gdraw_Metal_CreateContext((__bridge id<MTLDevice>)metalDevice, width, height);
-    // if (!gdraw_funcs) { app.DebugPrintf("Failed to initialise GDraw Metal!\n"); app.FatalLoadError(); }
-
-    // Resource limits (same as D3D11 version)
-    // gdraw_Metal_SetResourceLimits(GDRAW_METAL_RESOURCE_vertexbuffer, 5000,  16 * 1024 * 1024);
-    // gdraw_Metal_SetResourceLimits(GDRAW_METAL_RESOURCE_texture,      5000, 128 * 1024 * 1024);
-    // gdraw_Metal_SetResourceLimits(GDRAW_METAL_RESOURCE_rendertarget,   10,  64 * 1024 * 1024);
-
+    // gdraw_funcs = gdraw_Metal_CreateContext(...)
     // IggySetGDraw(gdraw_funcs);
-
-    // On Apple platforms we use AVAudioEngine, not DirectSound
     // IggyAudioUseSystemAudio();
 
-    // Shared base-class post-init (loads Iggy libraries, sets up fonts)
+    // Base-class post-init (loads Iggy libraries, sets up fonts)
+    // Only call when Iggy is available - it tries to load .swf files
     postInit();
 #endif
 }
@@ -53,16 +46,22 @@ void Apple_UIController::init(void* metalDevice, void* metalCommandQueue,
 void Apple_UIController::render()
 {
 #ifdef _ENABLEIGGY
-    // Tell GDraw which render target to use
-    // gdraw_Metal_SetTileOrigin((__bridge id<MTLTexture>)m_colorTexture,
-    //                           (__bridge id<MTLTexture>)m_depthStencilTexture,
-    //                           nullptr, 0, 0);
-
-    // Render all active Iggy scenes
     renderScenes();
+#endif
+}
 
-    // Signal end of GDraw rendering this frame
-    // gdraw_Metal_NoMoreGDrawThisFrame();
+// Override tick to be safe without Iggy (base class tick accesses Iggy resources)
+void Apple_UIController::tick()
+{
+#ifdef _ENABLEIGGY
+    UIController::tick();
+#endif
+}
+
+void Apple_UIController::CheckMenuDisplayed()
+{
+#ifdef _ENABLEIGGY
+    UIController::CheckMenuDisplayed();
 #endif
 }
 

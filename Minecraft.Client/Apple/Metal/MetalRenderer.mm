@@ -1059,8 +1059,19 @@ void C4JRender::Initialise(void *pDevice, void *pSwapChain)
         g_impl->shader_library = [g_impl->device newDefaultLibrary];
     }
 
+    // Try loading from the executable directory (where Xcode puts it)
     if (!g_impl->shader_library) {
-        NSLog(@"[MetalRenderer] FATAL: Could not load Metal shader library");
+        NSString *execPath = [[NSBundle mainBundle] executablePath];
+        NSString *execDir = [execPath stringByDeletingLastPathComponent];
+        NSString *metalLibPath = [execDir stringByAppendingPathComponent:@"default.metallib"];
+        g_impl->shader_library = [g_impl->device newLibraryWithFile:metalLibPath error:&error];
+        if (g_impl->shader_library) {
+            NSLog(@"[MetalRenderer] Loaded shader library from: %@", metalLibPath);
+        }
+    }
+
+    if (!g_impl->shader_library) {
+        NSLog(@"[MetalRenderer] FATAL: Could not load Metal shader library (error: %@)", error);
         return;
     }
 
@@ -1136,6 +1147,13 @@ void C4JRender::Initialise(void *pDevice, void *pSwapChain)
     CGSize drawable_size = g_impl->metal_layer.drawableSize;
     g_impl->screen_width = (int)drawable_size.width;
     g_impl->screen_height = (int)drawable_size.height;
+
+    // If drawable size is zero (layer not yet laid out), use a default
+    if (g_impl->screen_width <= 0 || g_impl->screen_height <= 0) {
+        g_impl->screen_width = 1280;
+        g_impl->screen_height = 720;
+        NSLog(@"[MetalRenderer] drawableSize was zero, using default %dx%d", g_impl->screen_width, g_impl->screen_height);
+    }
 
     // Create depth texture
     create_depth_texture(g_impl, g_impl->screen_width, g_impl->screen_height);
@@ -1643,6 +1661,11 @@ void C4JRender::TextureData(int width, int height, void *data, int level, eTextu
 
     // Create or replace the Metal texture if this is level 0 or dimensions changed
     if (level == 0 || entry.texture == nil) {
+        // Validate dimensions - Metal requires non-zero width/height
+        if (width <= 0 || height <= 0) {
+            NSLog(@"[MetalRenderer] WARNING: TextureData called with zero dimensions (%dx%d) for slot %d, skipping", width, height, g_impl->bound_texture_index);
+            return;
+        }
         int mip_count = entry.mip_levels > 0 ? entry.mip_levels : 1;
 
         MTLTextureDescriptor *desc = [MTLTextureDescriptor
@@ -1738,8 +1761,14 @@ HRESULT C4JRender::LoadTextureData(const char *szFilename, D3DXIMAGE_INFO *pSrcI
     // Load image file using Apple's ImageIO framework
     @autoreleasepool {
         NSString *path = [NSString stringWithUTF8String:szFilename];
+        // Convert Windows backslashes to forward slashes
+        path = [path stringByReplacingOccurrencesOfString:@"\\" withString:@"/"];
+
         NSData *file_data = [NSData dataWithContentsOfFile:path];
-        if (!file_data) return E_FAIL;
+        if (!file_data) {
+            NSLog(@"[MetalRenderer] LoadTextureData: file not found: %@", path);
+            return E_FAIL;
+        }
 
         // Use CGImage to decode
         CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)file_data);

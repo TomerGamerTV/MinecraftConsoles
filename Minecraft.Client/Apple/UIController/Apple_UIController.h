@@ -51,6 +51,10 @@ public:
     GDrawTexture* getSubstitutionTexture(int textureId);
     void destroySubstitutionTexture(void* destroyCallBackData, GDrawTexture* handle);
 
+    // Override tick/render to be safe without Iggy
+    virtual void tick() override;
+    void CheckMenuDisplayed();
+
 public:
     void shutdown();
 };

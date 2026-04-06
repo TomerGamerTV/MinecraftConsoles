@@ -679,9 +679,27 @@ inline BOOL FileTimeToSystemTime(const FILETIME*, SYSTEMTIME* st) {
 #define _FD_TO_HANDLE(fd) ((HANDLE)(intptr_t)((fd) + 1))
 #define _HANDLE_TO_FD(h)  ((int)((intptr_t)(h) - 1))
 
+// Helper: convert Windows backslash paths to forward slashes
+inline void _FixPath(char* dst, const char* src, size_t dstSize) {
+    strncpy(dst, src, dstSize - 1);
+    dst[dstSize - 1] = '\0';
+    for (char *p = dst; *p; ++p) { if (*p == '\\') *p = '/'; }
+}
+inline void _FixPathW(wchar_t* dst, const wchar_t* src, size_t dstSize) {
+    wcsncpy(dst, src, dstSize - 1);
+    dst[dstSize - 1] = L'\0';
+    for (wchar_t *p = dst; *p; ++p) { if (*p == L'\\') *p = L'/'; }
+}
+
 inline HANDLE CreateFileA(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
                           LPSECURITY_ATTRIBUTES, DWORD dwCreationDisposition,
                           DWORD dwFlagsAndAttributes, HANDLE) {
+    // Convert Windows backslashes to forward slashes
+    char fixedPath[1024];
+    strncpy(fixedPath, lpFileName, sizeof(fixedPath) - 1);
+    fixedPath[sizeof(fixedPath) - 1] = '\0';
+    for (char *p = fixedPath; *p; ++p) { if (*p == '\\') *p = '/'; }
+
     int flags = 0;
 
     // Access mode
@@ -701,7 +719,7 @@ inline HANDLE CreateFileA(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShar
         case TRUNCATE_EXISTING: flags |= O_TRUNC; break;
     }
 
-    int fd = open(lpFileName, flags, 0666);
+    int fd = open(fixedPath, flags, 0666);
     if (fd < 0) return INVALID_HANDLE_VALUE;
     return _FD_TO_HANDLE(fd);
 }
@@ -772,8 +790,9 @@ inline BOOL GetFileSizeEx(HANDLE hFile, PLARGE_INTEGER lpFileSize) {
 
 // GetFileAttributes - check if file/directory exists and get attributes
 inline DWORD GetFileAttributesA(LPCSTR lpFileName) {
+    char fp[1024]; _FixPath(fp, lpFileName, sizeof(fp));
     struct stat st;
-    if (stat(lpFileName, &st) != 0) return INVALID_FILE_ATTRIBUTES;
+    if (stat(fp, &st) != 0) return INVALID_FILE_ATTRIBUTES;
     DWORD attrs = 0;
     if (S_ISDIR(st.st_mode)) attrs |= FILE_ATTRIBUTE_DIRECTORY;
     else attrs |= FILE_ATTRIBUTE_NORMAL;
@@ -945,7 +964,8 @@ inline int _snwprintf(wchar_t* buf, size_t sz, const wchar_t* fmt, ...) {
 }
 
 inline errno_t fopen_s(FILE** f, const char* name, const char* mode) {
-    *f = fopen(name, mode);
+    char fp[1024]; _FixPath(fp, name, sizeof(fp));
+    *f = fopen(fp, mode);
     return *f ? 0 : errno;
 }
 

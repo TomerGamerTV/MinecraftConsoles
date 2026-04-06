@@ -13,6 +13,13 @@ set(MINECRAFT_WORLD_SOURCES
 
 add_library(Minecraft.World STATIC ${MINECRAFT_WORLD_SOURCES})
 
+# Apple-specific helper source files
+if(APPLE)
+  target_sources(Minecraft.World PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/AppleLevelHelper.cpp"
+  )
+endif()
+
 target_include_directories(Minecraft.World
   PRIVATE
   "${CMAKE_BINARY_DIR}/generated/"

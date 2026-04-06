@@ -139,6 +139,9 @@ if(APPLE)
     ${IMAGEIO_FRAMEWORK}
   )
 
+  # No special link flags needed - all symbols defined in AppleODRDefs.cpp
+  # target_link_options(Minecraft.Client PRIVATE)
+
   if(PLATFORM_NAME STREQUAL "macOS")
     find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
     find_library(IOKIT_FRAMEWORK IOKit REQUIRED)

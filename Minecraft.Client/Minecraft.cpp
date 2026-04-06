@@ -4776,12 +4776,19 @@ void Minecraft::main()
 
 	useLomp = true;
 
+	fprintf(stderr, "[MC-INIT] MinecraftWorld_RunStaticCtors\n"); fflush(stderr);
 	MinecraftWorld_RunStaticCtors();
+	fprintf(stderr, "[MC-INIT] EntityRenderDispatcher::staticCtor\n"); fflush(stderr);
 	EntityRenderDispatcher::staticCtor();
+	fprintf(stderr, "[MC-INIT] TileEntityRenderDispatcher::staticCtor\n"); fflush(stderr);
 	TileEntityRenderDispatcher::staticCtor();
+	fprintf(stderr, "[MC-INIT] User::staticCtor\n"); fflush(stderr);
 	User::staticCtor();
+	fprintf(stderr, "[MC-INIT] Tutorial::staticCtor\n"); fflush(stderr);
 	Tutorial::staticCtor();
+	fprintf(stderr, "[MC-INIT] ColourTable::staticCtor\n"); fflush(stderr);
 	ColourTable::staticCtor();
+	fprintf(stderr, "[MC-INIT] loadDefaultGameRules\n"); fflush(stderr);
 	app.loadDefaultGameRules();
 
 #ifdef _LARGE_WORLDS

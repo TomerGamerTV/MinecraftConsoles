@@ -28,18 +28,29 @@ void MinecraftWorld_RunStaticCtors()
 	// The ordering of these static ctors can be important. If they are within statement blocks then
 	// DO NOT CHANGE the ordering - 4J Stu
 
+	fprintf(stderr, "[SC] Packet\n"); fflush(stderr);
 	Packet::staticCtor();
 
 	{
+		fprintf(stderr, "[SC] MaterialColor\n"); fflush(stderr);
 		MaterialColor::staticCtor();
+		fprintf(stderr, "[SC] Material\n"); fflush(stderr);
 		Material::staticCtor();
+		fprintf(stderr, "[SC] Tile\n"); fflush(stderr);
 		Tile::staticCtor();
+		fprintf(stderr, "[SC] HatchetItem\n"); fflush(stderr);
 		HatchetItem::staticCtor();
+		fprintf(stderr, "[SC] PickaxeItem\n"); fflush(stderr);
 		PickaxeItem::staticCtor();
+		fprintf(stderr, "[SC] ShovelItem\n"); fflush(stderr);
 		ShovelItem::staticCtor();
+		fprintf(stderr, "[SC] BlockReplacements\n"); fflush(stderr);
 		BlockReplacements::staticCtor();
+		fprintf(stderr, "[SC] Biome\n"); fflush(stderr);
 		Biome::staticCtor();
+		fprintf(stderr, "[SC] MobEffect\n"); fflush(stderr);
 		MobEffect::staticCtor();
+		fprintf(stderr, "[SC] Item\n"); fflush(stderr);
 		Item::staticCtor();
 		FurnaceRecipes::staticCtor();
 		Recipes::staticCtor();	

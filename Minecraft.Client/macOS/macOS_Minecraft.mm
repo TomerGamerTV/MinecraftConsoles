@@ -1,50 +1,121 @@
 // macOS_Minecraft.mm — macOS entry point for Minecraft Legacy Console Edition
 // Cocoa + Metal application matching the Windows64_Minecraft.cpp game loop.
 
+// Include game precompiled header FIRST (defines types, STL, etc.)
+#include "stdafx.h"
+
+// Workaround: CarbonCore's 'Component' type conflicts with game code
+#define Component CarbonComponent_Renamed
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
 #import <QuartzCore/CVDisplayLink.h>
 #import <GameController/GameController.h>
 #import <Carbon/Carbon.h>  // kVK_ key codes
+#undef Component
 
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <pthread.h>
 
-// ── Forward declarations for Minecraft engine types ──────────────────────────
-// These match the same types the Windows64 entry point uses.
+// Game headers - access Minecraft class and game systems
+#include "../Minecraft.h"
+#include "../Common/Consoles_App.h"
+#include "../Common/Network/GameNetworkManager.h"
+#include "../Apple/Apple_App.h"
+#include "../Apple/Input/AppleKeyboardMouseInput.h"
+#include "../Apple/Network/BSDNetLayer.h"
 
-class Minecraft;
-class MinecraftServer;
-class ChatScreen;
-class Tesselator;
-class Level;
-class Tile;
-class Compression;
-class OldChunkStorage;
-class IntCache;
-class AABB;
-class Vec3;
+// Game renderer for post-processing
+#include "../GameRenderer.h"
 
-// ── Engine globals (defined in platform-agnostic code / libs) ────────────────
+// Forward-declare thread storage init functions
+// (full headers have complex dependency chains, we just need the static methods)
+extern "C" void AppleInitThreadStorage();
 
-// RenderManager, InputManager, StorageManager, ProfileManager, etc. are
-// global singletons declared in the 4J libraries. They are extern here so
-// the linker resolves them from the static libs.
-//
-// On macOS we use Metal, so the Renderer back-end will be the Metal
-// variant of C4JRender (4J_Render_Metal.a) rather than the D3D11 one.
+// ── Logging system ───────────────────────────────────────────────────────────
+// All game logs go to a file so they can be inspected later
 
-// Screen resolution — auto-detected from the main display at startup.
+static FILE* g_logFile = nullptr;
+static const char* g_logPath = nullptr;
+
+static void InitLogging()
+{
+    // Place log file next to the .app bundle
+    NSString* bundlePath = [[NSBundle mainBundle] bundlePath];
+    NSString* parentDir  = [bundlePath stringByDeletingLastPathComponent];
+    NSString* logFile    = [parentDir stringByAppendingPathComponent:@"minecraft_runtime.log"];
+    g_logPath = strdup([logFile UTF8String]);
+
+    g_logFile = fopen(g_logPath, "w");
+    if (!g_logFile) {
+        // Fallback to /tmp
+        g_logPath = "/tmp/minecraft_runtime.log";
+        g_logFile = fopen(g_logPath, "w");
+    }
+
+    if (g_logFile) {
+        // Get current time
+        time_t now = time(nullptr);
+        char timeStr[64];
+        strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", localtime(&now));
+        fprintf(g_logFile, "=== Minecraft LCE macOS Runtime Log ===\n");
+        fprintf(g_logFile, "=== Started: %s ===\n\n", timeStr);
+        fflush(g_logFile);
+
+        // Redirect stderr to our log file so fprintf(stderr,...) in game code is captured
+        dup2(fileno(g_logFile), STDERR_FILENO);
+    }
+}
+
+// Log a message to both the file and NSLog (console)
+static void GameLog(const char* fmt, ...)
+{
+    va_list args;
+    char buf[2048];
+
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+
+    // Write to log file
+    if (g_logFile) {
+        // Timestamp each line
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        double elapsed = ts.tv_sec + ts.tv_nsec / 1e9;
+        fprintf(g_logFile, "[%10.3f] %s\n", elapsed, buf);
+        fflush(g_logFile);
+    }
+
+    // Also print to console (visible in Xcode/Console.app)
+    NSLog(@"[MC] %s", buf);
+}
+
+// ── External declarations ────────────────────────────────────────────────────
+
+// These are defined in game code / Apple stubs
+extern C4JRender RenderManager;
+extern C_4JInput InputManager;
+extern C4JStorage StorageManager;
+extern C_4JProfile ProfileManager;
+extern CConsoleMinecraftApp app;
+extern Apple_UIController ui;
+extern KeyboardMouseInput g_KBMInput;
+// g_NetworkManager declared in GameNetworkManager.h
+
+// From Xbox_Minecraft.cpp / DefineActions
+extern void DefineActions(void);
+
+// Screen resolution
 static int g_iScreenWidth  = 1920;
 static int g_iScreenHeight = 1080;
 static int g_rScreenWidth  = 1920;
 static int g_rScreenHeight = 1080;
 static float g_iAspectRatio = 16.0f / 9.0f;
 
-// Username — loaded from username.txt next to the bundle
+// Username
 static char    g_AppleUsername[17]  = { 0 };
 static wchar_t g_AppleUsernameW[17] = { 0 };
 
@@ -55,89 +126,187 @@ static bool g_isFullscreen = false;
 static id<MTLDevice>       g_mtlDevice       = nil;
 static id<MTLCommandQueue> g_mtlCommandQueue = nil;
 
-// ── KeyboardMouseInput (lightweight re-implementation for macOS) ─────────────
-// Maps NSEvent key codes to the same virtual-key constants the Windows version
-// uses, then feeds them into the same KeyboardMouseInput class.
+// Game state
+static Minecraft* g_pMinecraft = nullptr;
+static bool g_gameInitialized = false;
+static int g_frameCount = 0;
 
-#pragma mark - Key Code Mapping
+// ── Key Code Mapping ─────────────────────────────────────────────────────────
 
-// Convert macOS virtual key code (kVK_*) to a Windows-compatible VK code
-// so the existing KeyboardMouseInput class works unmodified.
 static int MapMacKeyToVK(unsigned short keyCode)
 {
     switch (keyCode)
     {
-        case kVK_ANSI_A: return 'A';
-        case kVK_ANSI_B: return 'B';
-        case kVK_ANSI_C: return 'C';
-        case kVK_ANSI_D: return 'D';
-        case kVK_ANSI_E: return 'E';
-        case kVK_ANSI_F: return 'F';
-        case kVK_ANSI_G: return 'G';
-        case kVK_ANSI_H: return 'H';
-        case kVK_ANSI_I: return 'I';
-        case kVK_ANSI_J: return 'J';
-        case kVK_ANSI_K: return 'K';
-        case kVK_ANSI_L: return 'L';
-        case kVK_ANSI_M: return 'M';
-        case kVK_ANSI_N: return 'N';
-        case kVK_ANSI_O: return 'O';
-        case kVK_ANSI_P: return 'P';
-        case kVK_ANSI_Q: return 'Q';
-        case kVK_ANSI_R: return 'R';
-        case kVK_ANSI_S: return 'S';
-        case kVK_ANSI_T: return 'T';
-        case kVK_ANSI_U: return 'U';
-        case kVK_ANSI_V: return 'V';
-        case kVK_ANSI_W: return 'W';
-        case kVK_ANSI_X: return 'X';
-        case kVK_ANSI_Y: return 'Y';
-        case kVK_ANSI_Z: return 'Z';
-
-        case kVK_ANSI_0: return '0';
-        case kVK_ANSI_1: return '1';
-        case kVK_ANSI_2: return '2';
-        case kVK_ANSI_3: return '3';
-        case kVK_ANSI_4: return '4';
-        case kVK_ANSI_5: return '5';
-        case kVK_ANSI_6: return '6';
-        case kVK_ANSI_7: return '7';
-        case kVK_ANSI_8: return '8';
-        case kVK_ANSI_9: return '9';
-
-        case kVK_Return:     return 0x0D; // VK_RETURN
-        case kVK_Escape:     return 0x1B; // VK_ESCAPE
-        case kVK_Delete:     return 0x08; // VK_BACK (backspace)
-        case kVK_Tab:        return 0x09; // VK_TAB
-        case kVK_Space:      return 0x20; // VK_SPACE
-
-        case kVK_LeftArrow:  return 0x25; // VK_LEFT
-        case kVK_UpArrow:    return 0x26; // VK_UP
-        case kVK_RightArrow: return 0x27; // VK_RIGHT
-        case kVK_DownArrow:  return 0x28; // VK_DOWN
-
-        case kVK_Shift:      return 0xA0; // VK_LSHIFT
-        case kVK_RightShift: return 0xA1; // VK_RSHIFT
-        case kVK_Control:    return 0xA2; // VK_LCONTROL
-        case kVK_RightControl: return 0xA3; // VK_RCONTROL
-        case kVK_Option:     return 0xA4; // VK_LMENU (left alt)
-        case kVK_RightOption:return 0xA5; // VK_RMENU (right alt)
-
-        case kVK_F1:  return 0x70;
-        case kVK_F2:  return 0x71;
-        case kVK_F3:  return 0x72;
-        case kVK_F4:  return 0x73;
-        case kVK_F5:  return 0x74;
-        case kVK_F6:  return 0x75;
-        case kVK_F7:  return 0x76;
-        case kVK_F8:  return 0x77;
-        case kVK_F9:  return 0x78;
-        case kVK_F10: return 0x79;
-        case kVK_F11: return 0x7A;
-        case kVK_F12: return 0x7B;
-
+        case kVK_ANSI_A: return 'A';  case kVK_ANSI_B: return 'B';
+        case kVK_ANSI_C: return 'C';  case kVK_ANSI_D: return 'D';
+        case kVK_ANSI_E: return 'E';  case kVK_ANSI_F: return 'F';
+        case kVK_ANSI_G: return 'G';  case kVK_ANSI_H: return 'H';
+        case kVK_ANSI_I: return 'I';  case kVK_ANSI_J: return 'J';
+        case kVK_ANSI_K: return 'K';  case kVK_ANSI_L: return 'L';
+        case kVK_ANSI_M: return 'M';  case kVK_ANSI_N: return 'N';
+        case kVK_ANSI_O: return 'O';  case kVK_ANSI_P: return 'P';
+        case kVK_ANSI_Q: return 'Q';  case kVK_ANSI_R: return 'R';
+        case kVK_ANSI_S: return 'S';  case kVK_ANSI_T: return 'T';
+        case kVK_ANSI_U: return 'U';  case kVK_ANSI_V: return 'V';
+        case kVK_ANSI_W: return 'W';  case kVK_ANSI_X: return 'X';
+        case kVK_ANSI_Y: return 'Y';  case kVK_ANSI_Z: return 'Z';
+        case kVK_ANSI_0: return '0';  case kVK_ANSI_1: return '1';
+        case kVK_ANSI_2: return '2';  case kVK_ANSI_3: return '3';
+        case kVK_ANSI_4: return '4';  case kVK_ANSI_5: return '5';
+        case kVK_ANSI_6: return '6';  case kVK_ANSI_7: return '7';
+        case kVK_ANSI_8: return '8';  case kVK_ANSI_9: return '9';
+        case kVK_Return:     return 0x0D;
+        case kVK_Escape:     return 0x1B;
+        case kVK_Delete:     return 0x08;
+        case kVK_Tab:        return 0x09;
+        case kVK_Space:      return 0x20;
+        case kVK_LeftArrow:  return 0x25;
+        case kVK_UpArrow:    return 0x26;
+        case kVK_RightArrow: return 0x27;
+        case kVK_DownArrow:  return 0x28;
+        case kVK_Shift:      return 0xA0;
+        case kVK_RightShift: return 0xA1;
+        case kVK_Control:    return 0xA2;
+        case kVK_RightControl: return 0xA3;
+        case kVK_Option:     return 0xA4;
+        case kVK_RightOption:return 0xA5;
+        case kVK_F1:  return 0x70;  case kVK_F2:  return 0x71;
+        case kVK_F3:  return 0x72;  case kVK_F4:  return 0x73;
+        case kVK_F5:  return 0x74;  case kVK_F6:  return 0x75;
+        case kVK_F7:  return 0x76;  case kVK_F8:  return 0x77;
+        case kVK_F9:  return 0x78;  case kVK_F10: return 0x79;
+        case kVK_F11: return 0x7A;  case kVK_F12: return 0x7B;
         default: return 0;
     }
+}
+
+// ── Profile settings (matching Windows64) ────────────────────────────────────
+
+#define NUM_PROFILE_VALUES   5
+#define NUM_PROFILE_SETTINGS 4
+static DWORD dwProfileSettingsA[NUM_PROFILE_VALUES] = { 0, 0, 0, 0, 0 };
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Game Initialization — mirrors InitialiseMinecraftRuntime() from Windows64
+// ══════════════════════════════════════════════════════════════════════════════
+
+static Minecraft* InitialiseMinecraftRuntime(CAMetalLayer *metalLayer)
+{
+    GameLog("=== InitialiseMinecraftRuntime BEGIN ===");
+
+    // Step 1: Load media archive (game assets)
+    GameLog("INIT [1/14] loadMediaArchive...");
+    app.loadMediaArchive();
+    GameLog("INIT [1/14] loadMediaArchive DONE");
+
+    // Step 2: Initialize renderer
+    GameLog("INIT [2/14] RenderManager.Initialise (Metal)...");
+    RenderManager.Initialise((__bridge void*)g_mtlDevice, (__bridge void*)metalLayer);
+    GameLog("INIT [2/14] RenderManager.Initialise DONE");
+
+    // Step 3: Load string table
+    GameLog("INIT [3/14] loadStringTable...");
+    app.loadStringTable();
+    GameLog("INIT [3/14] loadStringTable DONE");
+
+    // Step 4: Initialize UI
+    GameLog("INIT [4/14] ui.init...");
+    ui.init((__bridge void*)g_mtlDevice, (__bridge void*)g_mtlCommandQueue,
+            nullptr, nullptr, g_rScreenWidth, g_rScreenHeight);
+    GameLog("INIT [4/14] ui.init DONE (%dx%d)", g_rScreenWidth, g_rScreenHeight);
+
+    // Step 5: Initialize input
+    GameLog("INIT [5/14] InputManager.Initialise...");
+    InputManager.Initialise(1, 3, MINECRAFT_ACTION_MAX, ACTION_MAX_MENU);
+    GameLog("INIT [5/14] InputManager.Initialise DONE");
+
+    // Step 6: Keyboard/mouse input
+    GameLog("INIT [6/14] g_KBMInput.Init...");
+    g_KBMInput.Init();
+    GameLog("INIT [6/14] g_KBMInput.Init DONE");
+
+    // Step 7: Define input actions
+    GameLog("INIT [7/14] DefineActions...");
+    DefineActions();
+    InputManager.SetJoypadMapVal(0, 0);
+    InputManager.SetKeyRepeatRate(0.3f, 0.2f);
+    GameLog("INIT [7/14] DefineActions DONE");
+
+    // Step 8: Profile manager
+    GameLog("INIT [8/14] ProfileManager.Initialise...");
+    ProfileManager.Initialise(
+        TITLEID_MINECRAFT,
+        app.m_dwOfferID,
+        PROFILE_VERSION_10,
+        NUM_PROFILE_VALUES,
+        NUM_PROFILE_SETTINGS,
+        dwProfileSettingsA,
+        app.GAME_DEFINED_PROFILE_DATA_BYTES * XUSER_MAX_COUNT,
+        &app.uiGameDefinedDataChangedBitmask
+    );
+    ProfileManager.SetDefaultOptionsCallback(&CConsoleMinecraftApp::DefaultOptionsCallback, (LPVOID)&app);
+    ProfileManager.SetDebugFullOverride(true);
+    GameLog("INIT [8/14] ProfileManager.Initialise DONE");
+
+    // Step 9: Network manager
+    GameLog("INIT [9/14] Network init...");
+    g_NetworkManager.Initialise();
+
+    // TODO: Set up IQNet player slots (needs IQNet header)
+    // For now, skip network player initialization - single player only
+
+    BSDNetLayer::Initialize();
+    GameLog("INIT [9/14] Network init DONE");
+
+    // Step 10: Thread storage for game systems
+    GameLog("INIT [10/14] CreateNewThreadStorage...");
+    AppleInitThreadStorage();
+    GameLog("INIT [10/14] CreateNewThreadStorage DONE");
+
+    // Step 11: Minecraft::main() — creates Minecraft instance, calls init() and run()
+    // This calls MinecraftWorld_RunStaticCtors, EntityRenderDispatcher::staticCtor, etc.
+    // Add a crash signal handler so we can log the crash location
+    GameLog("INIT [11/14] Minecraft::main()...");
+
+    // Install signal handler to catch crashes during init
+    signal(SIGSEGV, [](int sig) {
+        GameLog("CRASH: SIGSEGV during game initialization!");
+        GameLog("Check Console.app or ~/Library/Logs/DiagnosticReports/ for full stack trace");
+        _exit(1);
+    });
+    signal(SIGABRT, [](int sig) {
+        GameLog("CRASH: SIGABRT during game initialization!");
+        _exit(1);
+    });
+
+    Minecraft::main();
+
+    // Restore default signal handlers
+    signal(SIGSEGV, SIG_DFL);
+    signal(SIGABRT, SIG_DFL);
+
+    GameLog("INIT [11/14] Minecraft::main() DONE");
+
+    // Step 12: Get instance
+    Minecraft* pMinecraft = Minecraft::GetInstance();
+    if (pMinecraft == nullptr) {
+        GameLog("INIT ERROR: Minecraft::GetInstance() returned nullptr!");
+        return nullptr;
+    }
+    GameLog("INIT [12/14] Minecraft instance: %p", pMinecraft);
+
+    // Step 13: Game settings
+    GameLog("INIT [13/14] InitGameSettings...");
+    app.InitGameSettings();
+    GameLog("INIT [13/14] InitGameSettings DONE");
+
+    // Step 14: Tips
+    GameLog("INIT [14/14] InitialiseTips...");
+    app.InitialiseTips();
+    GameLog("INIT [14/14] InitialiseTips DONE");
+
+    GameLog("=== InitialiseMinecraftRuntime COMPLETE ===");
+    return pMinecraft;
 }
 
 // ── Application delegate ─────────────────────────────────────────────────────
@@ -150,67 +319,60 @@ static int MapMacKeyToVK(unsigned short keyCode)
 // ── MTKView delegate — drives the game loop each frame ───────────────────────
 
 @interface MinecraftRenderer : NSObject <MTKViewDelegate>
-@property (assign) bool gameInitialised;
 @end
 
-// ── Globals for the delegates ────────────────────────────────────────────────
-
+// Globals for the delegates
 static MinecraftAppDelegate* g_appDelegate  = nil;
 static MinecraftRenderer*    g_renderer     = nil;
 
-// ── Helper: load username from username.txt beside the app bundle ────────────
+// ── Helper: load username ────────────────────────────────────────────────────
 
 static void LoadUsername()
 {
-    // Look for username.txt next to the .app bundle
     NSString* bundlePath = [[NSBundle mainBundle] bundlePath];
     NSString* parentDir  = [bundlePath stringByDeletingLastPathComponent];
     NSString* userFile   = [parentDir stringByAppendingPathComponent:@"username.txt"];
 
     FILE* f = fopen([userFile UTF8String], "r");
-    if (f)
-    {
+    if (f) {
         char buf[128] = {};
-        if (fgets(buf, sizeof(buf), f))
-        {
-            // Trim trailing whitespace and newlines
+        if (fgets(buf, sizeof(buf), f)) {
             int len = (int)strlen(buf);
-            while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r' || buf[len - 1] == ' '))
+            while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r' || buf[len-1] == ' '))
                 buf[--len] = '\0';
-
-            if (len > 0)
-                strncpy(g_AppleUsername, buf, sizeof(g_AppleUsername) - 1);
+            if (len > 0) strncpy(g_AppleUsername, buf, sizeof(g_AppleUsername) - 1);
         }
         fclose(f);
     }
-
-    // Fallback
     if (g_AppleUsername[0] == 0)
         strncpy(g_AppleUsername, "Player", sizeof(g_AppleUsername) - 1);
 
-    // Convert to wide (simple ASCII-safe conversion)
     for (int i = 0; i < 17; i++)
         g_AppleUsernameW[i] = static_cast<wchar_t>(g_AppleUsername[i]);
 }
 
-// ── Helper: set working directory to Resources inside the .app bundle ────────
+// ── Helper: set working directory to app bundle resources ────────────────────
 
 static void SetWorkingDirectoryToResources()
 {
-    NSString* resourcePath = [[NSBundle mainBundle] resourcePath];
-    if (resourcePath)
-        chdir([resourcePath UTF8String]);
+    // Assets are in the MacOS/ directory alongside the executable, not Resources/
+    NSString* execPath = [[NSBundle mainBundle] executablePath];
+    NSString* macOSDir = [execPath stringByDeletingLastPathComponent];
+    if (macOSDir) {
+        chdir([macOSDir UTF8String]);
+        GameLog("Working directory: %s", [macOSDir UTF8String]);
+    }
 }
 
-// ── Helper: toggle borderless fullscreen ─────────────────────────────────────
+// ── Helper: toggle fullscreen ────────────────────────────────────────────────
 
 static void ToggleFullscreen()
 {
     NSWindow* window = g_appDelegate.window;
     if (!window) return;
-
     [window toggleFullScreen:nil];
     g_isFullscreen = !g_isFullscreen;
+    GameLog("Fullscreen toggled: %s", g_isFullscreen ? "ON" : "OFF");
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -219,74 +381,105 @@ static void ToggleFullscreen()
 
 @implementation MinecraftRenderer
 
-- (nonnull instancetype)init
-{
-    self = [super init];
-    if (self)
-    {
-        _gameInitialised = false;
-    }
-    return self;
-}
-
 // Called once per display refresh — this is the main game loop tick.
-// Mirrors the MSG loop body from Windows64_Minecraft.cpp.
 - (void)drawInMTKView:(nonnull MTKView*)view
 {
-    // TODO: Once the Metal Renderer back-end is integrated, the full
-    // game loop goes here:
-    //
-    //   g_KBMInput.Tick();
-    //   RenderManager.StartFrame();
-    //   app.UpdateTime();
-    //   InputManager.Tick();
-    //   StorageManager.Tick();
-    //   RenderManager.Tick();
-    //   g_NetworkManager.DoWork();
-    //
-    //   if (app.GetGameStarted()) {
-    //       pMinecraft->applyFrameMouseLook();
-    //       pMinecraft->run_middle();
-    //   } else {
-    //       pMinecraft->soundEngine->tick(nullptr, 0.0f);
-    //       pMinecraft->textures->tick(true, false);
-    //       IntCache::Reset();
-    //   }
-    //
-    //   pMinecraft->soundEngine->playMusicTick();
-    //   ui.tick();
-    //   ui.render();
-    //   pMinecraft->gameRenderer->ApplyGammaPostProcess();
-    //   RenderManager.Present();
-    //   ui.CheckMenuDisplayed();
-
-    // Placeholder: clear to dark blue (same as Win64 default)
-    @autoreleasepool
-    {
-        id<MTLCommandBuffer> commandBuffer = [g_mtlCommandQueue commandBuffer];
-        MTLRenderPassDescriptor* passDesc  = view.currentRenderPassDescriptor;
-        if (passDesc)
-        {
-            passDesc.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.125, 0.3, 1.0);
-            passDesc.colorAttachments[0].loadAction = MTLLoadActionClear;
-            id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:passDesc];
-            [encoder endEncoding];
+    if (!g_gameInitialized || !g_pMinecraft) {
+        // Not yet initialized — clear to dark blue placeholder
+        @autoreleasepool {
+            id<MTLCommandBuffer> commandBuffer = [g_mtlCommandQueue commandBuffer];
+            MTLRenderPassDescriptor* passDesc  = view.currentRenderPassDescriptor;
+            if (passDesc) {
+                passDesc.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.125, 0.3, 1.0);
+                passDesc.colorAttachments[0].loadAction = MTLLoadActionClear;
+                id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:passDesc];
+                [encoder endEncoding];
+            }
+            [commandBuffer presentDrawable:view.currentDrawable];
+            [commandBuffer commit];
         }
-        [commandBuffer presentDrawable:view.currentDrawable];
-        [commandBuffer commit];
+        return;
+    }
+
+    @autoreleasepool {
+        @try {
+            g_frameCount++;
+
+            // Log first few frames and then every 600th frame (~10 seconds)
+            bool shouldLog = (g_frameCount <= 5) || (g_frameCount % 600 == 0);
+
+            if (shouldLog)
+                GameLog("FRAME %d BEGIN", g_frameCount);
+
+            // 1. Start frame (acquires Metal drawable, creates command encoder)
+            RenderManager.StartFrame();
+
+            // 2. Update time
+            app.UpdateTime();
+
+            // 3. Input
+            InputManager.Tick();
+
+            // 4. Storage
+            StorageManager.Tick();
+
+            // 5. Render manager housekeeping
+            RenderManager.Tick();
+
+            // 6. Network
+            g_NetworkManager.DoWork();
+
+            // 7. Game logic
+            if (app.GetGameStarted()) {
+                if (shouldLog) GameLog("FRAME %d: Game running - run_middle()", g_frameCount);
+                g_pMinecraft->applyFrameMouseLook();
+                g_pMinecraft->run_middle();
+            } else {
+                if (shouldLog) GameLog("FRAME %d: Menu mode", g_frameCount);
+                if (shouldLog) GameLog("FRAME %d: soundEngine->tick", g_frameCount);
+                g_pMinecraft->soundEngine->tick(nullptr, 0.0f);
+                if (shouldLog) GameLog("FRAME %d: textures->tick", g_frameCount);
+                g_pMinecraft->textures->tick(true, false);
+            }
+
+            // 8. Audio
+            if (shouldLog) GameLog("FRAME %d: playMusicTick", g_frameCount);
+            g_pMinecraft->soundEngine->playMusicTick();
+
+            // 9. UI
+            if (shouldLog) GameLog("FRAME %d: ui.tick", g_frameCount);
+            ui.tick();
+            if (shouldLog) GameLog("FRAME %d: ui.render", g_frameCount);
+            ui.render();
+
+            // 10. Present
+            if (shouldLog) GameLog("FRAME %d: Present", g_frameCount);
+            RenderManager.Present();
+
+            // 11. Post-present
+            if (shouldLog) GameLog("FRAME %d: CheckMenuDisplayed", g_frameCount);
+            ui.CheckMenuDisplayed();
+
+            if (shouldLog)
+                GameLog("FRAME %d END", g_frameCount);
+
+        } @catch (NSException *exception) {
+            GameLog("FRAME %d EXCEPTION: %s - %s",
+                    g_frameCount,
+                    [[exception name] UTF8String],
+                    [[exception reason] UTF8String]);
+        }
     }
 }
 
-// Called when the view resizes — update internal resolution tracking.
 - (void)mtkView:(nonnull MTKView*)view drawableSizeDidChange:(CGSize)size
 {
     g_rScreenWidth  = (int)size.width;
     g_rScreenHeight = (int)size.height;
     g_iAspectRatio  = (float)g_rScreenWidth / (float)g_rScreenHeight;
 
-    NSLog(@"[macOS] Drawable size changed: %d x %d", g_rScreenWidth, g_rScreenHeight);
-
-    // TODO: Resize Metal depth/stencil, update RenderManager, ui.updateScreenSize()
+    GameLog("Drawable size changed: %d x %d (aspect %.2f)",
+            g_rScreenWidth, g_rScreenHeight, g_iAspectRatio);
 }
 
 @end
@@ -299,15 +492,19 @@ static void ToggleFullscreen()
 
 - (void)applicationDidFinishLaunching:(NSNotification*)notification
 {
+    // ── Logging ─────────────────────────────────────────────────────────
+    InitLogging();
+    GameLog("applicationDidFinishLaunching");
+
     // ── Metal device ─────────────────────────────────────────────────────
     g_mtlDevice = MTLCreateSystemDefaultDevice();
-    if (!g_mtlDevice)
-    {
-        NSLog(@"[macOS] FATAL: Metal is not supported on this Mac.");
+    if (!g_mtlDevice) {
+        GameLog("FATAL: Metal is not supported on this Mac.");
         [NSApp terminate:nil];
         return;
     }
     g_mtlCommandQueue = [g_mtlDevice newCommandQueue];
+    GameLog("Metal device: %s", [[g_mtlDevice name] UTF8String]);
 
     // ── Detect display resolution ────────────────────────────────────────
     NSScreen* mainScreen = [NSScreen mainScreen];
@@ -316,6 +513,7 @@ static void ToggleFullscreen()
     g_rScreenWidth  = (int)(screenFrame.size.width  * backingScale);
     g_rScreenHeight = (int)(screenFrame.size.height * backingScale);
     g_iAspectRatio  = (float)g_rScreenWidth / (float)g_rScreenHeight;
+    GameLog("Display: %dx%d @ %.1fx scale", g_rScreenWidth, g_rScreenHeight, backingScale);
 
     // ── Create window ────────────────────────────────────────────────────
     NSRect contentRect = NSMakeRect(0, 0, 1280, 720);
@@ -350,26 +548,28 @@ static void ToggleFullscreen()
     // ── Load username and set working directory ──────────────────────────
     LoadUsername();
     SetWorkingDirectoryToResources();
+    GameLog("Username: %s", g_AppleUsername);
 
-    NSLog(@"[macOS] Minecraft LCE starting — user: %s, display: %dx%d",
-          g_AppleUsername, g_rScreenWidth, g_rScreenHeight);
+    // ── Initialize game runtime ──────────────────────────────────────────
+    GameLog("=== Starting game initialization ===");
 
-    // ── Game initialisation ──────────────────────────────────────────────
-    // TODO: Call the same initialisation sequence as Windows:
-    //
-    //   app.loadMediaArchive();
-    //   RenderManager.Initialise(g_mtlDevice, ...);
-    //   app.loadStringTable();
-    //   ui.init(...);
-    //   InputManager.Initialise(1, 3, MINECRAFT_ACTION_MAX, ACTION_MAX_MENU);
-    //   g_KBMInput.Init();
-    //   DefineActions();
-    //   ProfileManager.Initialise(...);
-    //   g_NetworkManager.Initialise();
-    //   BSDNetLayer::Initialize();
-    //   Tesselator::CreateNewThreadStorage(1024 * 1024);
-    //   ... (same as InitialiseMinecraftRuntime)
-    //   Minecraft::main();
+    @try {
+        CAMetalLayer *metalLayer = (CAMetalLayer *)self.metalView.layer;
+        g_pMinecraft = InitialiseMinecraftRuntime(metalLayer);
+        if (g_pMinecraft) {
+            g_gameInitialized = true;
+            GameLog("=== Game initialization SUCCEEDED ===");
+            GameLog("Minecraft instance: %p", g_pMinecraft);
+        } else {
+            GameLog("=== Game initialization FAILED (nullptr) ===");
+        }
+    } @catch (NSException *exception) {
+        GameLog("=== Game initialization EXCEPTION: %s - %s ===",
+                [[exception name] UTF8String],
+                [[exception reason] UTF8String]);
+    }
+
+    GameLog("Log file location: %s", g_logPath ? g_logPath : "(unknown)");
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)sender
@@ -379,20 +579,28 @@ static void ToggleFullscreen()
 
 - (void)applicationWillTerminate:(NSNotification*)notification
 {
-    NSLog(@"[macOS] Shutting down...");
-    // TODO: BSDNetLayer::Shutdown();
-    // TODO: ui.shutdown();
-    // TODO: CleanupDevice();
-}
+    GameLog("=== applicationWillTerminate ===");
 
-// ── Window delegate — resize handling ────────────────────────────────────────
+    g_gameInitialized = false;
+
+    GameLog("Shutting down network...");
+    BSDNetLayer::Shutdown();
+
+    GameLog("Shutting down UI...");
+    // ui.shutdown();
+
+    GameLog("Shutdown complete.");
+
+    if (g_logFile) {
+        fclose(g_logFile);
+        g_logFile = nullptr;
+    }
+}
 
 - (void)windowDidResize:(NSNotification*)notification
 {
-    // MTKView handles drawable resize automatically via mtkView:drawableSizeDidChange:
+    // MTKView handles drawable resize via mtkView:drawableSizeDidChange:
 }
-
-// ── Keyboard events ──────────────────────────────────────────────────────────
 
 - (void)keyDown:(NSEvent*)event
 {
@@ -420,23 +628,19 @@ static void ToggleFullscreen()
     if (vk == 0) return;
 
     // F11 toggles fullscreen
-    if (vk == 0x7A) // VK_F11
-    {
+    if (vk == 0x7A) {
         ToggleFullscreen();
         return;
     }
 
-    // TODO: g_KBMInput.OnKeyDown(vk);
+    g_KBMInput.OnKeyDown(vk);
 
     // Forward typed characters for chat / text input
     NSString* chars = event.characters;
-    if (chars.length > 0)
-    {
+    if (chars.length > 0) {
         unichar ch = [chars characterAtIndex:0];
         if (ch >= 0x20 || ch == 0x08 || ch == 0x0D)
-        {
-            // TODO: g_KBMInput.OnChar((wchar_t)ch);
-        }
+            g_KBMInput.OnChar((wchar_t)ch);
     }
 }
 
@@ -444,66 +648,64 @@ static void ToggleFullscreen()
 {
     int vk = MapMacKeyToVK(event.keyCode);
     if (vk == 0) return;
-    // TODO: g_KBMInput.OnKeyUp(vk);
+    g_KBMInput.OnKeyUp(vk);
 }
 
 - (void)flagsChanged:(NSEvent*)event
 {
-    // Handle modifier key presses (shift, control, option/alt)
-    // TODO: Map modifier flags to OnKeyDown/OnKeyUp calls
+    // Handle modifier key state changes
 }
 
 - (void)mouseDown:(NSEvent*)event
 {
-    // TODO: g_KBMInput.OnMouseButtonDown(KeyboardMouseInput::MOUSE_LEFT);
+    g_KBMInput.OnMouseButtonDown(0); // MOUSE_LEFT
 }
 
 - (void)mouseUp:(NSEvent*)event
 {
-    // TODO: g_KBMInput.OnMouseButtonUp(KeyboardMouseInput::MOUSE_LEFT);
+    g_KBMInput.OnMouseButtonUp(0);
 }
 
 - (void)rightMouseDown:(NSEvent*)event
 {
-    // TODO: g_KBMInput.OnMouseButtonDown(KeyboardMouseInput::MOUSE_RIGHT);
+    g_KBMInput.OnMouseButtonDown(1); // MOUSE_RIGHT
 }
 
 - (void)rightMouseUp:(NSEvent*)event
 {
-    // TODO: g_KBMInput.OnMouseButtonUp(KeyboardMouseInput::MOUSE_RIGHT);
+    g_KBMInput.OnMouseButtonUp(1);
 }
 
 - (void)otherMouseDown:(NSEvent*)event
 {
-    // TODO: g_KBMInput.OnMouseButtonDown(KeyboardMouseInput::MOUSE_MIDDLE);
+    g_KBMInput.OnMouseButtonDown(2); // MOUSE_MIDDLE
 }
 
 - (void)otherMouseUp:(NSEvent*)event
 {
-    // TODO: g_KBMInput.OnMouseButtonUp(KeyboardMouseInput::MOUSE_MIDDLE);
+    g_KBMInput.OnMouseButtonUp(2);
 }
 
 - (void)mouseMoved:(NSEvent*)event
 {
     NSPoint loc = [event locationInWindow];
-    // TODO: g_KBMInput.OnMouseMove((int)loc.x, (int)(g_rScreenHeight - loc.y));
+    g_KBMInput.OnMouseMove((int)loc.x, (int)(g_rScreenHeight - loc.y));
 }
 
 - (void)mouseDragged:(NSEvent*)event
 {
-    // Raw delta for mouse look when grabbed
-    // TODO: g_KBMInput.OnRawMouseDelta((int)event.deltaX, (int)event.deltaY);
+    g_KBMInput.OnRawMouseDelta((int)event.deltaX, (int)event.deltaY);
 }
 
 - (void)rightMouseDragged:(NSEvent*)event
 {
-    // TODO: g_KBMInput.OnRawMouseDelta((int)event.deltaX, (int)event.deltaY);
+    g_KBMInput.OnRawMouseDelta((int)event.deltaX, (int)event.deltaY);
 }
 
 - (void)scrollWheel:(NSEvent*)event
 {
     int delta = (int)(event.scrollingDeltaY * 120.0);
-    // TODO: g_KBMInput.OnMouseWheel(delta);
+    g_KBMInput.OnMouseWheel(delta);
 }
 
 @end
@@ -516,20 +718,17 @@ int main(int argc, const char* argv[])
 {
     @autoreleasepool
     {
-        // Create the NSApplication
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
-        // Set up app icon (loaded from bundle resources)
         NSImage* appIcon = [NSImage imageNamed:@"AppIcon"];
         if (appIcon)
             [NSApp setApplicationIconImage:appIcon];
 
-        // Create and assign the delegate
         g_appDelegate = [[MinecraftAppDelegate alloc] init];
         [NSApp setDelegate:g_appDelegate];
 
-        // Build a minimal menu bar (so Cmd-Q works, etc.)
+        // Minimal menu bar
         NSMenu* menuBar = [[NSMenu alloc] init];
         NSMenuItem* appMenuItem = [[NSMenuItem alloc] init];
         [menuBar addItem:appMenuItem];
@@ -544,7 +743,6 @@ int main(int argc, const char* argv[])
         [appMenuItem setSubmenu:appMenu];
         [NSApp setMainMenu:menuBar];
 
-        // Activate and run
         [NSApp activateIgnoringOtherApps:YES];
         [NSApp run];
     }
