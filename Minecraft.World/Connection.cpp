@@ -335,6 +335,14 @@ bool Connection::readTick()
 
 	if (packet != nullptr)
 	{
+		static int s_readPacketLogs = 0;
+		if (s_readPacketLogs < 12)
+		{
+			app.DebugPrintf("CONNECTION READ PACKET: server=%d id=%d\n",
+				packetListener->isServerPacketListener() ? 1 : 0,
+				packet->getId());
+			++s_readPacketLogs;
+		}
 		readSizes[packet->getId()] += packet->getEstimatedSize() + 1;
 		EnterCriticalSection(&incoming_cs);
 		if(!quitting)
@@ -377,6 +385,14 @@ void Connection::close(DisconnectPacket::eDisconnectReason reason, ...)
 //	printf("Con:0x%x close\n",this);
 	if (!running) return;
 //	printf("Con:0x%x close doing something\n",this);
+	app.DebugPrintf("Connection::close server=%d reason=%d running=%d quitting=%d disconnected=%d noInputTicks=%d estimatedRemaining=%d\n",
+		packetListener != nullptr && packetListener->isServerPacketListener() ? 1 : 0,
+		(int)reason,
+		running ? 1 : 0,
+		quitting ? 1 : 0,
+		disconnected ? 1 : 0,
+		noInputTicks,
+		estimatedRemaining);
 	disconnected = true;
 
 	va_list input;
@@ -508,6 +524,17 @@ void Connection::tick()
 	// MGH - moved the packet handling outside of the incoming_cs block, as it was locking up sometimes when disconnecting
 	for(size_t i = 0; i < packetsToHandle.size(); i++)
 	{
+		static int s_handlePacketLogs = 0;
+		if (s_handlePacketLogs < 12)
+		{
+			app.DebugPrintf("CONNECTION HANDLE PACKET: server=%d id=%d queued=%zu inSession=%d leaving=%d\n",
+				packetListener->isServerPacketListener() ? 1 : 0,
+				packetsToHandle[i]->getId(),
+				packetsToHandle.size(),
+				g_NetworkManager.IsInSession() ? 1 : 0,
+				g_NetworkManager.IsLeavingGame() ? 1 : 0);
+			++s_handlePacketLogs;
+		}
 		PIXBeginNamedEvent(0,"Handling packet %d\n",packetsToHandle[i]->getId());
 		packetsToHandle[i]->handle(packetListener);
 		PIXEndNamedEvent();

@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "Apple_App.h"
 #include "../Minecraft.h"
+#include "../MinecraftServer.h"
 #include "../Common/UI/UIController.h"
 #include "../Common/UI/UIScene.h"
 #include "../Common/Leaderboards/LeaderboardManager.h"
@@ -26,7 +27,62 @@ int CConsoleMinecraftApp::LoadLocalTMSFile(WCHAR*) { return 0; }
 int CConsoleMinecraftApp::LoadLocalTMSFile(WCHAR*, eFileExtensionType) { return 0; }
 void CConsoleMinecraftApp::FreeLocalTMSFiles(eTMSFileType) {}
 int CConsoleMinecraftApp::GetLocalTMSFileIndex(WCHAR*, bool, eFileExtensionType) { return -1; }
-void CConsoleMinecraftApp::TemporaryCreateGameStart() {}
+void CConsoleMinecraftApp::TemporaryCreateGameStart()
+{
+    fprintf(stderr, "[Apple] TemporaryCreateGameStart - auto-starting creative world\n");
+    fflush(stderr);
+
+    Minecraft* pMinecraft = Minecraft::GetInstance();
+    if (!pMinecraft) {
+        fprintf(stderr, "[Apple] ERROR: No Minecraft instance!\n");
+        return;
+    }
+
+    // Set up game host options for a creative world
+    app.SetGameHostOption(eGameHostOption_GameType, 1);     // Creative mode
+    app.SetGameHostOption(eGameHostOption_Difficulty, 0);    // Peaceful
+    app.SetGameHostOption(eGameHostOption_LevelType, 0);     // Normal terrain (0=default, 1=flat)
+    app.SetGameHostOption(eGameHostOption_Structures, 1);
+    app.SetGameHostOption(eGameHostOption_BonusChest, 0);
+    app.SetGameHostOption(eGameHostOption_PvP, 0);
+    app.SetGameHostOption(eGameHostOption_TrustPlayers, 1);
+    app.SetGameHostOption(eGameHostOption_FireSpreads, 1);
+    app.SetGameHostOption(eGameHostOption_TNT, 1);
+    app.SetGameHostOption(eGameHostOption_DoMobSpawning, 0);
+    app.SetGameHostOption(eGameHostOption_DoDaylightCycle, 1);
+
+    // Host a local game
+    fprintf(stderr, "[Apple] Calling HostGame...\n"); fflush(stderr);
+    g_NetworkManager.HostGame(1, false, false, MINECRAFT_NET_MAX_PLAYERS, 0);
+    g_NetworkManager.FakeLocalPlayerJoined();
+
+    // Create game start parameters
+    NetworkGameInitData *param = new NetworkGameInitData();
+    param->seed = 12345;
+    param->findSeed = false;
+    param->settings = app.GetGameHostOption(eGameHostOption_All);
+    param->xzSize = LEVEL_MAX_WIDTH;
+    param->hellScale = HELL_LEVEL_MAX_SCALE;
+    param->levelName = L"Apple Test World";
+
+    // Start the game on a background thread
+    fprintf(stderr, "[Apple] Starting game on background thread...\n"); fflush(stderr);
+
+    static NetworkGameInitData* s_param = param;
+    C4JThread* gameThread = new C4JThread(
+        [](void* p) -> int {
+            fprintf(stderr, "[Apple] Background: RunNetworkGameThreadProc starting\n"); fflush(stderr);
+            int result = CGameNetworkManager::RunNetworkGameThreadProc(p);
+            fprintf(stderr, "[Apple] Background: RunNetworkGameThreadProc returned %d\n", result); fflush(stderr);
+            return result;
+        },
+        static_cast<void*>(s_param),
+        "GameStartThread"
+    );
+    gameThread->Run();
+
+    fprintf(stderr, "[Apple] TemporaryCreateGameStart done\n"); fflush(stderr);
+}
 
 // =========================================================================
 // Global variables referenced by Windows64 game code

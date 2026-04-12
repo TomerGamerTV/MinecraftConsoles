@@ -952,11 +952,23 @@ void Textures::replaceTextureDirect(intArray rawPixels, int w, int h, int id)
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 
+	byteArray rgbaPixels(w * h * 4);
+	for (unsigned int i = 0; i < rawPixels.length; ++i)
+	{
+		int pixel = rawPixels[i];
+		rgbaPixels[i * 4 + 0] = static_cast<byte>((pixel >> 24) & 0xff);
+		rgbaPixels[i * 4 + 1] = static_cast<byte>((pixel >> 16) & 0xff);
+		rgbaPixels[i * 4 + 2] = static_cast<byte>((pixel >> 8) & 0xff);
+		rgbaPixels[i * 4 + 3] = static_cast<byte>(pixel & 0xff);
+	}
+
 #ifdef _XBOX
-	RenderManager.TextureDataUpdate(rawPixels.data, 0);
+	RenderManager.TextureDataUpdate(rgbaPixels.data, 0);
 #else
-	RenderManager.TextureDataUpdate(0, 0, w, h, rawPixels.data, 0);
+	RenderManager.TextureDataUpdate(0, 0, w, h, rgbaPixels.data, 0);
 #endif
+
+	delete [] rgbaPixels.data;
 }
 
 // 4J - added. This is a more minimal version of replaceTexture that assumes the texture bytes are already in order, and so doesn't do any of the extra copying round
@@ -1618,4 +1630,3 @@ bool Textures::IsOriginalImage(TEXTURE_NAME texId, const wstring& name)
 	}
 	return false;
 }
-

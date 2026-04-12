@@ -68,6 +68,12 @@ PendingConnection::~PendingConnection()
 
 void PendingConnection::tick()
 {
+	static int s_pendingTickLogs = 0;
+	if (s_pendingTickLogs < 12)
+	{
+		app.DebugPrintf("PendingConnection::tick done=%d accepted=%p tick=%d\n", done ? 1 : 0, acceptedLogin.get(), _tick);
+		++s_pendingTickLogs;
+	}
 	if (acceptedLogin != nullptr)
 	{
 		this->handleAcceptedLogin(acceptedLogin);
@@ -98,6 +104,10 @@ void PendingConnection::disconnect(DisconnectPacket::eDisconnectReason reason)
 
 void PendingConnection::handlePreLogin(shared_ptr<PreLoginPacket> packet)
 {
+	app.DebugPrintf("PendingConnection::handlePreLogin net=%d loginKey=%ls playerCount=%u\n",
+		packet->m_netcodeVersion,
+		packet->loginKey.c_str(),
+		packet->m_dwPlayerCount);
 	if (packet->m_netcodeVersion != MINECRAFT_NET_VERSION)
 	{
 		app.DebugPrintf("Netcode version is %d not equal to %d\n", packet->m_netcodeVersion, MINECRAFT_NET_VERSION);
@@ -118,14 +128,17 @@ void PendingConnection::handlePreLogin(shared_ptr<PreLoginPacket> packet)
 
 void PendingConnection::sendPreLoginResponse()
 {
+	app.DebugPrintf("PendingConnection::sendPreLoginResponse begin\n");
 	// 4J Stu - Calculate the players with UGC privileges set
 	PlayerUID *ugcXuids = new PlayerUID[MINECRAFT_NET_MAX_PLAYERS];
 	DWORD ugcXuidCount = 0;
 	DWORD hostIndex = 0;
 	BYTE ugcFriendsOnlyBits = 0;
-	char szUniqueMapName[14];
+	char storageUniqueMapName[MAX_SAVEFILENAME_LENGTH] = {};
+	char szUniqueMapName[PreLoginPacket::m_iSaveNameLen] = {};
 
-	StorageManager.GetSaveUniqueFilename(szUniqueMapName);
+	StorageManager.GetSaveUniqueFilename(storageUniqueMapName);
+	memcpy(szUniqueMapName, storageUniqueMapName, sizeof(szUniqueMapName));
 
 	PlayerList *playerList = MinecraftServer::getInstance()->getPlayers();
 	for(auto& player : playerList->players)
@@ -149,6 +162,10 @@ void PendingConnection::sendPreLoginResponse()
 			++ugcXuidCount;
 		}
 	}
+	app.DebugPrintf("PendingConnection::sendPreLoginResponse players=%u hostIndex=%u texturePack=%u\n",
+		ugcXuidCount,
+		hostIndex,
+		server->m_texturePackId);
 
 #if 0
 	if (false)//	server->onlineMode) // 4J - removed
@@ -163,12 +180,19 @@ void PendingConnection::sendPreLoginResponse()
 		BYTE cappedHostIndex = (hostIndex >= 255u) ? 254 : static_cast<BYTE>(hostIndex);
 		connection->send(std::make_shared<PreLoginPacket>(L"-", ugcXuids, cappedCount, ugcFriendsOnlyBits, server->m_ugcPlayersVersion, szUniqueMapName, app.GetGameHostOption(eGameHostOption_All), cappedHostIndex, server->m_texturePackId));
 	}
+	app.DebugPrintf("PendingConnection::sendPreLoginResponse queued\n");
 }
 
 void PendingConnection::handleLogin(shared_ptr<LoginPacket> packet)
 {
 	//	printf("Server: handleLogin\n");
 	//name = packet->userName;
+	app.DebugPrintf("PendingConnection::handleLogin name=%ls offlineValid=%d onlineValid=%d guest=%d ugcVersion=%u\n",
+		packet->userName.c_str(),
+		packet->m_offlineXuid != INVALID_XUID ? 1 : 0,
+		packet->m_onlineXuid != INVALID_XUID ? 1 : 0,
+		packet->m_isGuest ? 1 : 0,
+		packet->m_ugcPlayersVersion);
 	if (packet->clientVersion != SharedConstants::NETWORK_PROTOCOL_VERSION)
 	{
 		app.DebugPrintf("Client version is %d not equal to %d\n", packet->clientVersion, SharedConstants::NETWORK_PROTOCOL_VERSION);
@@ -319,6 +343,10 @@ void PendingConnection::handleLogin(shared_ptr<LoginPacket> packet)
 
 void PendingConnection::handleAcceptedLogin(shared_ptr<LoginPacket> packet)
 {
+	app.DebugPrintf("PendingConnection::handleAcceptedLogin name=%ls playerVersion=%u serverVersion=%u\n",
+		packet->userName.c_str(),
+		packet->m_ugcPlayersVersion,
+		server->m_ugcPlayersVersion);
 	if(packet->m_ugcPlayersVersion != server->m_ugcPlayersVersion)
 	{
 		// Send the pre-login packet again with the new list of players

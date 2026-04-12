@@ -379,12 +379,17 @@ void Texture::blit(int x, int y, Texture *source, bool rotated)
 	//{
 	//	return;
 	//}
+	if (source == nullptr)
+	{
+		return;
+	}
 
 	for(unsigned int level = 0; level < m_iMipLevels; ++level)
 	{
 		ByteBuffer *srcBuffer = source->getData(level);
 
 		if(srcBuffer == nullptr) break;
+		if(data[level] == nullptr) break;
 
 		int yy = y >> level;
 		int xx = x >> level;
@@ -392,6 +397,42 @@ void Texture::blit(int x, int y, Texture *source, bool rotated)
 		int ww = width >> level;
 		int shh = source->getHeight() >> level;
 		int sww = source->getWidth() >> level;
+
+		if (ww <= 0 || hh <= 0 || sww <= 0 || shh <= 0)
+		{
+			break;
+		}
+
+		if (xx < 0 || yy < 0 || (xx + sww) > ww || (yy + shh) > hh)
+		{
+			fprintf(stderr,
+			        "Texture::blit OOB skipped dst=%ls src=%ls level=%u dst=%dx%d pos=(%d,%d) src=%dx%d rotated=%d\n",
+			        name.c_str(),
+			        source->getName().c_str(),
+			        level,
+			        ww,
+			        hh,
+			        xx,
+			        yy,
+			        sww,
+			        shh,
+			        rotated ? 1 : 0);
+			continue;
+		}
+
+		if ((srcBuffer->getSize() < (sww * shh * 4)) || (data[level]->getSize() < (ww * hh * 4)))
+		{
+			fprintf(stderr,
+			        "Texture::blit buffer size mismatch dst=%ls src=%ls level=%u dstBytes=%d srcBytes=%d needDst=%d needSrc=%d\n",
+			        name.c_str(),
+			        source->getName().c_str(),
+			        level,
+			        data[level]->getSize(),
+			        srcBuffer->getSize(),
+			        ww * hh * 4,
+			        sww * shh * 4);
+			continue;
+		}
 
 		data[level]->position(0);
 		srcBuffer->position(0);
@@ -469,7 +510,7 @@ void Texture::blit(int x, int y, Texture *source, bool rotated)
 
 			if (rotated)
 			{
-				dstY = yy + (shh - srcY);
+				dstY = yy + (shh - srcY - 1);
 			}
 
 			for (int srcX = 0; srcX < sww; srcX++)

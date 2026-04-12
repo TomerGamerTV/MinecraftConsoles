@@ -36,6 +36,14 @@ void OffsettedRenderList::add(int list)
 	// 4J - added - chunkList::getList returns -1 when chunks aren't visible, we really don't want to end up sending that to glCallLists
 	if( list >= 0 )
 	{
+		unsigned int count = lists->position();
+		for (unsigned int i = 0; i < count; ++i)
+		{
+			if (lists->get(i) == list)
+			{
+				return;
+			}
+		}
 	    lists->put(list);
 	}
     if (lists->remaining() == 0) render();

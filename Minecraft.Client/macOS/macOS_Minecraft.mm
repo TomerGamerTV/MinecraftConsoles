@@ -17,7 +17,10 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <sys/stat.h>
 #include <pthread.h>
+#include <sstream>
+#include <vector>
 
 // Game headers - access Minecraft class and game systems
 #include "../Minecraft.h"
@@ -39,6 +42,7 @@ extern "C" void AppleInitThreadStorage();
 
 static FILE* g_logFile = nullptr;
 static const char* g_logPath = nullptr;
+static const char* g_controlPath = nullptr;
 
 static void InitLogging()
 {
@@ -66,6 +70,17 @@ static void InitLogging()
 
         // Redirect stderr to our log file so fprintf(stderr,...) in game code is captured
         dup2(fileno(g_logFile), STDERR_FILENO);
+    }
+
+    if (bundlePath) {
+        NSString* parentDir = [bundlePath stringByDeletingLastPathComponent];
+        NSString* controlFile = [parentDir stringByAppendingPathComponent:@"minecraft_control.txt"];
+        g_controlPath = strdup([controlFile UTF8String]);
+
+        FILE* control = fopen(g_controlPath, "a");
+        if (control) {
+            fclose(control);
+        }
     }
 }
 
@@ -121,6 +136,8 @@ static wchar_t g_AppleUsernameW[17] = { 0 };
 
 // Fullscreen state
 static bool g_isFullscreen = false;
+static NSRect g_windowedFrame = NSZeroRect;
+static NSWindowStyleMask g_windowedStyleMask = 0;
 
 // Metal objects
 static id<MTLDevice>       g_mtlDevice       = nil;
@@ -130,6 +147,11 @@ static id<MTLCommandQueue> g_mtlCommandQueue = nil;
 static Minecraft* g_pMinecraft = nullptr;
 static bool g_gameInitialized = false;
 static int g_frameCount = 0;
+static bool g_autoStartIssued = false;
+static int g_framesWithoutGameStart = 0;
+static int g_framesWithoutLevel = 0;
+static time_t g_lastControlMTime = 0;
+static bool g_frameInProgress = false;
 
 // ── Key Code Mapping ─────────────────────────────────────────────────────────
 
@@ -314,6 +336,12 @@ static Minecraft* InitialiseMinecraftRuntime(CAMetalLayer *metalLayer)
 @interface MinecraftAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
 @property (strong) NSWindow*  window;
 @property (strong) MTKView*   metalView;
+@property (assign) bool gameStartupScheduled;
+@property (strong) NSTimer* windowWatchdogTimer;
+@property (strong) NSTimer* frameTimer;
+@end
+
+@interface MinecraftWindow : NSWindow
 @end
 
 // ── MTKView delegate — drives the game loop each frame ───────────────────────
@@ -370,9 +398,188 @@ static void ToggleFullscreen()
 {
     NSWindow* window = g_appDelegate.window;
     if (!window) return;
-    [window toggleFullScreen:nil];
+
+    NSScreen* screen = [window screen] ?: [NSScreen mainScreen];
+    if (!screen) return;
+
+    if (!g_isFullscreen) {
+        g_windowedFrame = [window frame];
+        g_windowedStyleMask = [window styleMask];
+
+        [window setStyleMask:NSWindowStyleMaskBorderless];
+        [window setFrame:[screen frame] display:YES animate:NO];
+        [window setMovable:NO];
+        [window setTitleVisibility:NSWindowTitleHidden];
+        [window setTitlebarAppearsTransparent:YES];
+        [window setCollectionBehavior:NSWindowCollectionBehaviorManaged];
+    } else {
+        [window setStyleMask:g_windowedStyleMask ? g_windowedStyleMask : (NSWindowStyleMaskTitled |
+                                                                          NSWindowStyleMaskClosable |
+                                                                          NSWindowStyleMaskMiniaturizable |
+                                                                          NSWindowStyleMaskResizable)];
+        [window setFrame:g_windowedFrame display:YES animate:NO];
+        [window setMovable:YES];
+        [window setTitleVisibility:NSWindowTitleVisible];
+        [window setTitlebarAppearsTransparent:NO];
+        [window setCollectionBehavior:NSWindowCollectionBehaviorManaged];
+    }
+
+    [window makeKeyAndOrderFront:nil];
     g_isFullscreen = !g_isFullscreen;
     GameLog("Fullscreen toggled: %s", g_isFullscreen ? "ON" : "OFF");
+}
+
+static int ParseControlVK(const std::string& token)
+{
+    if (token.size() == 1) {
+        unsigned char ch = static_cast<unsigned char>(token[0]);
+        if (ch >= 'a' && ch <= 'z') ch = static_cast<unsigned char>(ch - ('a' - 'A'));
+        return ch;
+    }
+
+    if (token == "ESC" || token == "ESCAPE") return 0x1B;
+    if (token == "ENTER" || token == "RETURN") return 0x0D;
+    if (token == "TAB") return 0x09;
+    if (token == "SPACE") return 0x20;
+    if (token == "LEFT") return 0x25;
+    if (token == "UP") return 0x26;
+    if (token == "RIGHT") return 0x27;
+    if (token == "DOWN") return 0x28;
+    if (token == "F11") return 0x7A;
+    if (token == "SHIFT") return 0xA0;
+    if (token == "CTRL" || token == "CONTROL") return 0xA2;
+    if (token == "ALT" || token == "OPTION") return 0xA4;
+
+    return 0;
+}
+
+static void ProcessControlCommand(const std::string& rawLine)
+{
+    std::string line = rawLine;
+    while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ' || line.back() == '\t'))
+        line.pop_back();
+    size_t start = 0;
+    while (start < line.size() && (line[start] == ' ' || line[start] == '\t'))
+        ++start;
+    line.erase(0, start);
+
+    if (line.empty() || line[0] == '#')
+        return;
+
+    if (line == "quit" || line == "close") {
+        GameLog("CONTROL: terminating app");
+        [NSApp terminate:nil];
+        return;
+    }
+
+    if (line == "fullscreen") {
+        if (!g_isFullscreen)
+            ToggleFullscreen();
+        return;
+    }
+
+    if (line == "windowed") {
+        if (g_isFullscreen)
+            ToggleFullscreen();
+        return;
+    }
+
+    if (line == "status") {
+        GameLog("CONTROL STATUS: frame=%d gameStarted=%d level=%p screen=%p fullscreen=%d",
+                g_frameCount,
+                app.GetGameStarted() ? 1 : 0,
+                g_pMinecraft ? g_pMinecraft->level : nullptr,
+                g_pMinecraft ? g_pMinecraft->screen : nullptr,
+                g_isFullscreen ? 1 : 0);
+        return;
+    }
+
+    std::istringstream stream(line);
+    std::string command;
+    stream >> command;
+
+    if (command == "key") {
+        std::string keyName;
+        stream >> keyName;
+        int vk = ParseControlVK(keyName);
+        if (vk != 0) {
+            GameLog("CONTROL: key %s", keyName.c_str());
+            g_KBMInput.OnKeyDown(vk);
+            g_KBMInput.OnKeyUp(vk);
+        } else {
+            GameLog("CONTROL: unknown key '%s'", keyName.c_str());
+        }
+        return;
+    }
+
+    if (command == "text") {
+        std::string text;
+        std::getline(stream, text);
+        if (!text.empty() && text[0] == ' ')
+            text.erase(0, 1);
+        GameLog("CONTROL: text \"%s\"", text.c_str());
+        for (char ch : text)
+            g_KBMInput.OnChar(static_cast<wchar_t>(static_cast<unsigned char>(ch)));
+        return;
+    }
+
+    if (command == "mouse") {
+        std::string subcommand;
+        stream >> subcommand;
+
+        if (subcommand == "move") {
+            int x = 0;
+            int y = 0;
+            if (stream >> x >> y) {
+                GameLog("CONTROL: mouse move %d %d", x, y);
+                g_KBMInput.OnMouseMove(x, y);
+            }
+            return;
+        }
+
+        if (subcommand == "click") {
+            std::string buttonName;
+            stream >> buttonName;
+            int button = 0;
+            if (buttonName == "left") button = 0;
+            else if (buttonName == "right") button = 1;
+            else if (buttonName == "middle") button = 2;
+            GameLog("CONTROL: mouse click %s", buttonName.c_str());
+            g_KBMInput.OnMouseButtonDown(button);
+            g_KBMInput.OnMouseButtonUp(button);
+            return;
+        }
+    }
+
+    GameLog("CONTROL: unknown command '%s'", line.c_str());
+}
+
+static void PollControlFile()
+{
+    if (!g_controlPath)
+        return;
+
+    struct stat st = {};
+    if (stat(g_controlPath, &st) != 0)
+        return;
+
+    if (st.st_size <= 0 || st.st_mtime <= g_lastControlMTime)
+        return;
+
+    FILE* control = fopen(g_controlPath, "r");
+    if (!control)
+        return;
+
+    char line[512];
+    while (fgets(line, sizeof(line), control))
+        ProcessControlCommand(line);
+    fclose(control);
+
+    control = fopen(g_controlPath, "w");
+    if (control)
+        fclose(control);
+
+    g_lastControlMTime = st.st_mtime;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -384,6 +591,11 @@ static void ToggleFullscreen()
 // Called once per display refresh — this is the main game loop tick.
 - (void)drawInMTKView:(nonnull MTKView*)view
 {
+    if (g_frameInProgress)
+        return;
+
+    g_frameInProgress = true;
+
     if (!g_gameInitialized || !g_pMinecraft) {
         // Not yet initialized — clear to dark blue placeholder
         @autoreleasepool {
@@ -398,6 +610,7 @@ static void ToggleFullscreen()
             [commandBuffer presentDrawable:view.currentDrawable];
             [commandBuffer commit];
         }
+        g_frameInProgress = false;
         return;
     }
 
@@ -428,18 +641,59 @@ static void ToggleFullscreen()
 
             // 6. Network
             g_NetworkManager.DoWork();
+            if ((g_frameCount % 10) == 0)
+                PollControlFile();
 
             // 7. Game logic
             if (app.GetGameStarted()) {
-                if (shouldLog) GameLog("FRAME %d: Game running - run_middle()", g_frameCount);
-                g_pMinecraft->applyFrameMouseLook();
-                g_pMinecraft->run_middle();
+                g_framesWithoutGameStart = 0;
+                static bool firstGameFrame = true;
+                if (firstGameFrame || shouldLog) {
+                    GameLog("FRAME %d: Game running - run_middle()", g_frameCount);
+                    firstGameFrame = false;
+                }
+                // Only run game logic if we have a valid level
+                if (g_pMinecraft->level != nullptr) {
+                    g_framesWithoutLevel = 0;
+                    g_pMinecraft->applyFrameMouseLook();
+                    g_pMinecraft->run_middle();
+                    if (shouldLog) GameLog("FRAME %d: run_middle() done", g_frameCount);
+                } else {
+                    // No level yet - keep network traffic moving so the local client/server handshake can finish.
+                    g_pMinecraft->soundEngine->tick(nullptr, 0.0f);
+                    g_pMinecraft->textures->tick(true, false);
+                    g_pMinecraft->tickAllConnections();
+                    g_framesWithoutLevel++;
+                    static bool loggedNoLevel = false;
+                    if (!loggedNoLevel || (g_frameCount % 300) == 0) {
+                        GameLog("FRAME %d: GameStarted but no level - waiting for world load", g_frameCount);
+                        loggedNoLevel = true;
+                    }
+                    if (g_autoStartIssued && g_framesWithoutLevel > (60 * 30)) {
+                        GameLog("STALL GUARD: auto-started world never produced a level; terminating app");
+                        g_frameInProgress = false;
+                        [NSApp terminate:nil];
+                        return;
+                    }
+                }
             } else {
+                if (g_autoStartIssued) {
+                    g_framesWithoutGameStart++;
+                    if (g_framesWithoutGameStart > (60 * 30)) {
+                        GameLog("STALL GUARD: auto-started world never reached gameStarted; terminating app");
+                        g_frameInProgress = false;
+                        [NSApp terminate:nil];
+                        return;
+                    }
+                }
                 if (shouldLog) GameLog("FRAME %d: Menu mode", g_frameCount);
                 if (shouldLog) GameLog("FRAME %d: soundEngine->tick", g_frameCount);
                 g_pMinecraft->soundEngine->tick(nullptr, 0.0f);
                 if (shouldLog) GameLog("FRAME %d: textures->tick", g_frameCount);
                 g_pMinecraft->textures->tick(true, false);
+                // Tick network connections so client can process server packets
+                // (needed for the client-server handshake during world loading)
+                g_pMinecraft->tickAllConnections();
             }
 
             // 8. Audio
@@ -470,9 +724,11 @@ static void ToggleFullscreen()
                     [[exception reason] UTF8String]);
         }
     }
+
+    g_frameInProgress = false;
 }
 
-- (void)mtkView:(nonnull MTKView*)view drawableSizeDidChange:(CGSize)size
+- (void)mtkView:(nonnull MTKView*)view drawableSizeWillChange:(CGSize)size
 {
     g_rScreenWidth  = (int)size.width;
     g_rScreenHeight = (int)size.height;
@@ -489,6 +745,124 @@ static void ToggleFullscreen()
 // ══════════════════════════════════════════════════════════════════════════════
 
 @implementation MinecraftAppDelegate
+
+- (void)ensureWindowAndView
+{
+    bool needsWindow = (self.window == nil);
+    bool needsView = (self.metalView == nil);
+
+    if (!needsWindow && !needsView) {
+        if (![self.window isVisible] || self.window.contentView != self.metalView) {
+            [self.window setContentView:self.metalView];
+            [self.window makeKeyAndOrderFront:nil];
+            [self.window orderFrontRegardless];
+            [NSApp activateIgnoringOtherApps:YES];
+            GameLog("Window watchdog re-show: visible=%d windowNumber=%ld",
+                    (int)[self.window isVisible],
+                    (long)[self.window windowNumber]);
+        }
+        return;
+    }
+
+    if (needsWindow) {
+        NSRect contentRect = NSMakeRect(0, 0, 1280, 720);
+        NSWindowStyleMask styleMask = NSWindowStyleMaskTitled
+                                    | NSWindowStyleMaskClosable
+                                    | NSWindowStyleMaskMiniaturizable
+                                    | NSWindowStyleMaskResizable;
+
+        self.window = (NSWindow*)[[MinecraftWindow alloc] initWithContentRect:contentRect
+                                                                    styleMask:styleMask
+                                                                      backing:NSBackingStoreBuffered
+                                                                        defer:NO];
+        [self.window setTitle:@"Minecraft LCE"];
+        [self.window center];
+        [self.window setDelegate:self];
+        [self.window setAcceptsMouseMovedEvents:YES];
+        [self.window setCollectionBehavior:NSWindowCollectionBehaviorManaged];
+        [self.window setReleasedWhenClosed:NO];
+        [self.window setRestorable:NO];
+    }
+
+    if (needsView) {
+        NSRect contentRect = [self.window contentRectForFrameRect:self.window.frame];
+        self.metalView = [[MTKView alloc] initWithFrame:contentRect device:g_mtlDevice];
+        self.metalView.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
+        self.metalView.depthStencilPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+        self.metalView.preferredFramesPerSecond = 60;
+        self.metalView.clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        // Drive MTKView manually from our timer so we only have one frame source.
+        self.metalView.paused = YES;
+        self.metalView.enableSetNeedsDisplay = YES;
+
+        if (!g_renderer)
+            g_renderer = [[MinecraftRenderer alloc] init];
+        self.metalView.delegate = g_renderer;
+    }
+
+    [self.window setContentView:self.metalView];
+    [self.window makeKeyAndOrderFront:nil];
+    [self.window orderFrontRegardless];
+    [NSApp activateIgnoringOtherApps:YES];
+
+    GameLog("Window ready: visible=%d windowNumber=%ld contentView=%p metalView=%p",
+            (int)[self.window isVisible],
+            (long)[self.window windowNumber],
+            self.window.contentView,
+            self.metalView);
+}
+
+- (void)startGameInitialization
+{
+    if (g_gameInitialized || self.gameStartupScheduled)
+        return;
+
+    self.gameStartupScheduled = true;
+    GameLog("=== Starting game initialization ===");
+
+    @try {
+        CAMetalLayer *metalLayer = (CAMetalLayer *)self.metalView.layer;
+        g_pMinecraft = InitialiseMinecraftRuntime(metalLayer);
+        if (g_pMinecraft) {
+            g_gameInitialized = true;
+            GameLog("=== Game initialization SUCCEEDED ===");
+            GameLog("Minecraft instance: %p", g_pMinecraft);
+
+            // Auto-start a creative world for testing
+            GameLog("=== Auto-starting test world ===");
+            g_autoStartIssued = true;
+            app.TemporaryCreateGameStart();
+            GameLog("=== Test world started ===");
+        } else {
+            GameLog("=== Game initialization FAILED (nullptr) ===");
+        }
+    } @catch (NSException *exception) {
+        GameLog("=== Game initialization EXCEPTION: %s - %s ===",
+                [[exception name] UTF8String],
+                [[exception reason] UTF8String]);
+    }
+
+    GameLog("Log file location: %s", g_logPath ? g_logPath : "(unknown)");
+}
+
+- (void)windowWatchdogTick:(NSTimer*)timer
+{
+    (void)timer;
+    [self ensureWindowAndView];
+}
+
+- (void)frameTimerTick:(NSTimer*)timer
+{
+    (void)timer;
+    if (self.metalView) {
+        [self.metalView draw];
+    }
+}
+
+- (void)toggleGameFullscreen:(id)sender
+{
+    ToggleFullscreen();
+}
 
 - (void)applicationDidFinishLaunching:(NSNotification*)notification
 {
@@ -515,61 +889,29 @@ static void ToggleFullscreen()
     g_iAspectRatio  = (float)g_rScreenWidth / (float)g_rScreenHeight;
     GameLog("Display: %dx%d @ %.1fx scale", g_rScreenWidth, g_rScreenHeight, backingScale);
 
-    // ── Create window ────────────────────────────────────────────────────
-    NSRect contentRect = NSMakeRect(0, 0, 1280, 720);
-    NSWindowStyleMask styleMask = NSWindowStyleMaskTitled
-                                | NSWindowStyleMaskClosable
-                                | NSWindowStyleMaskMiniaturizable
-                                | NSWindowStyleMaskResizable;
-
-    self.window = [[NSWindow alloc] initWithContentRect:contentRect
-                                              styleMask:styleMask
-                                                backing:NSBackingStoreBuffered
-                                                  defer:NO];
-    [self.window setTitle:@"Minecraft LCE"];
-    [self.window center];
-    [self.window setDelegate:self];
-    [self.window setAcceptsMouseMovedEvents:YES];
-    [self.window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenPrimary];
-
-    // ── MTKView ──────────────────────────────────────────────────────────
-    self.metalView = [[MTKView alloc] initWithFrame:contentRect device:g_mtlDevice];
-    self.metalView.colorPixelFormat      = MTLPixelFormatBGRA8Unorm;
-    self.metalView.depthStencilPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
-    self.metalView.preferredFramesPerSecond = 60;
-    self.metalView.clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
-
-    g_renderer = [[MinecraftRenderer alloc] init];
-    self.metalView.delegate = g_renderer;
-
-    [self.window setContentView:self.metalView];
-    [self.window makeKeyAndOrderFront:nil];
+    [NSWindow setAllowsAutomaticWindowTabbing:NO];
+    [self ensureWindowAndView];
+    self.windowWatchdogTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
+                                                                target:self
+                                                              selector:@selector(windowWatchdogTick:)
+                                                              userInfo:nil
+                                                               repeats:YES];
+    self.frameTimer = [NSTimer timerWithTimeInterval:(1.0 / 60.0)
+                                              target:self
+                                            selector:@selector(frameTimerTick:)
+                                            userInfo:nil
+                                             repeats:YES];
+    [[NSRunLoop mainRunLoop] addTimer:self.frameTimer forMode:NSRunLoopCommonModes];
 
     // ── Load username and set working directory ──────────────────────────
     LoadUsername();
     SetWorkingDirectoryToResources();
     GameLog("Username: %s", g_AppleUsername);
 
-    // ── Initialize game runtime ──────────────────────────────────────────
-    GameLog("=== Starting game initialization ===");
-
-    @try {
-        CAMetalLayer *metalLayer = (CAMetalLayer *)self.metalView.layer;
-        g_pMinecraft = InitialiseMinecraftRuntime(metalLayer);
-        if (g_pMinecraft) {
-            g_gameInitialized = true;
-            GameLog("=== Game initialization SUCCEEDED ===");
-            GameLog("Minecraft instance: %p", g_pMinecraft);
-        } else {
-            GameLog("=== Game initialization FAILED (nullptr) ===");
-        }
-    } @catch (NSException *exception) {
-        GameLog("=== Game initialization EXCEPTION: %s - %s ===",
-                [[exception name] UTF8String],
-                [[exception reason] UTF8String]);
-    }
-
-    GameLog("Log file location: %s", g_logPath ? g_logPath : "(unknown)");
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self ensureWindowAndView];
+        [self startGameInitialization];
+    });
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)sender
@@ -577,11 +919,21 @@ static void ToggleFullscreen()
     return YES;
 }
 
+- (void)applicationDidBecomeActive:(NSNotification*)notification
+{
+    (void)notification;
+    [self ensureWindowAndView];
+}
+
 - (void)applicationWillTerminate:(NSNotification*)notification
 {
     GameLog("=== applicationWillTerminate ===");
 
     g_gameInitialized = false;
+    [self.windowWatchdogTimer invalidate];
+    self.windowWatchdogTimer = nil;
+    [self.frameTimer invalidate];
+    self.frameTimer = nil;
 
     GameLog("Shutting down network...");
     BSDNetLayer::Shutdown();
@@ -602,6 +954,25 @@ static void ToggleFullscreen()
     // MTKView handles drawable resize via mtkView:drawableSizeDidChange:
 }
 
+- (void)windowDidBecomeKey:(NSNotification*)notification
+{
+    g_KBMInput.SetWindowFocused(true);
+}
+
+- (void)windowDidResignKey:(NSNotification*)notification
+{
+    g_KBMInput.SetWindowFocused(false);
+}
+
+- (void)windowWillClose:(NSNotification*)notification
+{
+    (void)notification;
+    GameLog("Window will close");
+    self.metalView.delegate = nil;
+    self.metalView = nil;
+    self.window = nil;
+}
+
 - (void)keyDown:(NSEvent*)event
 {
     // Prevent beep on unhandled keys
@@ -612,9 +983,6 @@ static void ToggleFullscreen()
 // ══════════════════════════════════════════════════════════════════════════════
 #pragma mark - Custom NSWindow subclass for key/mouse event capture
 // ══════════════════════════════════════════════════════════════════════════════
-
-@interface MinecraftWindow : NSWindow
-@end
 
 @implementation MinecraftWindow
 
@@ -734,8 +1102,9 @@ int main(int argc, const char* argv[])
         [menuBar addItem:appMenuItem];
         NSMenu* appMenu = [[NSMenu alloc] init];
         [appMenu addItemWithTitle:@"Toggle Fullscreen"
-                           action:@selector(toggleFullScreen:)
+                           action:@selector(toggleGameFullscreen:)
                     keyEquivalent:@"f"];
+        [[appMenu itemAtIndex:0] setTarget:g_appDelegate];
         [appMenu addItem:[NSMenuItem separatorItem]];
         [appMenu addItemWithTitle:@"Quit Minecraft LCE"
                            action:@selector(terminate:)

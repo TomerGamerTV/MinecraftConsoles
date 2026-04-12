@@ -220,6 +220,14 @@ void ClientConnection::handleLogin(shared_ptr<LoginPacket> packet)
 {
 	if (done) return;
 
+	app.DebugPrintf("ClientConnection::handleLogin user=%ls dim=%d gameType=%d maxPlayers=%u playerIndex=%u multiplayerId=%d\n",
+		packet->userName.c_str(),
+		(int)packet->dimension,
+		packet->gameType,
+		(unsigned int)packet->maxPlayers,
+		(unsigned int)packet->m_playerIndex,
+		packet->m_multiplayerInstanceId);
+
 	PlayerUID OnlineXuid;
 	ProfileManager.GetXUID(m_userIndex,&OnlineXuid,true); // online xuid
 	MOJANG_DATA *pMojangData = nullptr;
@@ -1421,6 +1429,12 @@ void ClientConnection::onDisconnect(DisconnectPacket::eDisconnectReason reason, 
 	if (done) return;
 	done = true;
 
+	app.DebugPrintf("ClientConnection::onDisconnect user=%d reason=%d gameStarted=%d host=%d\n",
+		m_userIndex,
+		(int)reason,
+		app.GetGameStarted() ? 1 : 0,
+		g_NetworkManager.IsHost() ? 1 : 0);
+
 	Minecraft *pMinecraft = Minecraft::GetInstance();
 	pMinecraft->connectionDisconnected( m_userIndex , reason );
 
@@ -1430,6 +1444,7 @@ void ClientConnection::onDisconnect(DisconnectPacket::eDisconnectReason reason, 
 	if(g_NetworkManager.IsHost() &&
 		(reason == DisconnectPacket::eDisconnect_TimeOut || reason == DisconnectPacket::eDisconnect_Overflow) &&
 		m_userIndex == ProfileManager.GetPrimaryPad() &&
+		app.GetGameStarted() &&
 		!MinecraftServer::saveOnExitAnswered() )
 	{
 		UINT uiIDA[1];
@@ -2000,6 +2015,12 @@ void ClientConnection::handleEntityActionAtPosition(shared_ptr<EntityActionAtPos
 void ClientConnection::handlePreLogin(shared_ptr<PreLoginPacket> packet)
 {
 //	printf("Client: handlePreLogin\n");
+	app.DebugPrintf("ClientConnection::handlePreLogin loginKey=%ls playerCount=%u hostIndex=%u texturePack=%u settings=0x%08X\n",
+		packet->loginKey.c_str(),
+		packet->m_dwPlayerCount,
+		(unsigned int)packet->m_hostIndex,
+		packet->m_texturePackId,
+		packet->m_serverSettings);
 #if 1
 	// 4J - Check that we can play with all the players already in the game who have Friends-Only UGC set
 	BOOL canPlay = TRUE;

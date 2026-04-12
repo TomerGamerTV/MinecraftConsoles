@@ -15,7 +15,7 @@ void glTranslatef(float x,float y,float z)
 
 void glRotatef(float angle, float x, float y, float z)
 {
-	RenderManager.MatrixRotate(angle*(PI/180.0f),x,y,z);
+	RenderManager.MatrixRotate(angle, x, y, z);
 }
 
 void glPopMatrix()

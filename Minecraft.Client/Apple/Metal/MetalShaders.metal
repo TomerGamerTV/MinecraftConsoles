@@ -9,6 +9,15 @@ using namespace metal;
 // Maximum number of directional lights supported
 #define MAX_LIGHTS 2
 
+// Temporary debugging toggles.
+#define DEBUG_VISUALIZE_BASE_TEXTURE 0
+#define DEBUG_VISUALIZE_SOLID_WHITE 0
+#define DEBUG_VISUALIZE_UV_GRADIENT 0
+#define DEBUG_BYPASS_TEXTURE_MATRIX 0
+#define DEBUG_VISUALIZE_VERTEX_PATH 0
+#define DEBUG_DISABLE_LIGHT_TEXTURE 0
+#define DEBUG_DISABLE_FOG 0
+
 // Shared uniform data passed from CPU to GPU each draw call
 struct Uniforms {
     float4x4 modelview_matrix;
@@ -53,25 +62,27 @@ struct Uniforms {
     float  gamma;
 };
 
-// Standard vertex: Position(3f), TexCoord(2f), Colour(4b), Normal(4b), Padding(4b) = 36 bytes
+// Standard vertex: Position(3f), TexCoord(2f), Colour(4b), Normal(4b), Tex2(2 x int16) = 32 bytes
 struct VertexStandard {
     float3 position  [[attribute(0)]];
     float2 texcoord  [[attribute(1)]];
     uchar4 colour    [[attribute(2)]];
     char4  normal    [[attribute(3)]];
-    // Padding attribute(4) consumed but unused
+    short2 texcoord2 [[attribute(4)]];
 };
 
-// Compressed vertex format
+// Compressed vertex format used by the non-Xbox client path:
+// 8 x int16_t per vertex = x, y, z, rgb565, u, v, tex2u, tex2v.
 struct VertexCompressed {
-    short4  position_packed [[attribute(0)]];  // xyz in .xyz, texU in .w
-    short4  data_packed     [[attribute(1)]];   // texV in .x, colour+normal packed
+    short4 position_and_colour [[attribute(0)]];
+    short4 uv_and_aux          [[attribute(1)]];
 };
 
 // Vertex shader output / fragment shader input
 struct VertexOut {
     float4 position [[position]];
     float2 texcoord;
+    float2 light_texcoord;
     float4 colour;
     float3 normal;
     float  fog_factor;             // 0.0 = fully fogged, 1.0 = no fog
@@ -83,6 +94,40 @@ struct VertexOutLine {
     float4 colour;
     float  fog_factor;
 };
+
+static float4 to_metal_clip_space(float4 clip_pos)
+{
+    clip_pos.z = (clip_pos.z + clip_pos.w) * 0.5;
+    return clip_pos;
+}
+
+static float4 decode_standard_vertex_colour(uchar4 packed_colour, constant Uniforms &uniforms)
+{
+    float4 colour = float4(packed_colour.w, packed_colour.z, packed_colour.y, packed_colour.x) / 255.0;
+    return colour * uniforms.colour_tint;
+}
+
+static float2 decode_light_texcoord(short2 packed_texcoord, constant Uniforms &uniforms)
+{
+    if (packed_texcoord.x == -512 && packed_texcoord.y == -512) {
+        return uniforms.vertex_texture_uv;
+    }
+    return float2(packed_texcoord) / 256.0;
+}
+
+static float4 sample_game_texture(
+    texture2d<float> tex,
+    sampler tex_sampler,
+    float2 encoded_uv)
+{
+    float2 sample_uv = encoded_uv;
+    bool disable_mipmap = sample_uv.x > 1.0;
+    if (disable_mipmap) {
+        sample_uv.x -= 1.0;
+        return tex.sample(tex_sampler, sample_uv, level(0.0));
+    }
+    return tex.sample(tex_sampler, sample_uv);
+}
 
 // ------------------------------------------------------------------
 // Helper: compute fog factor from eye-space Z distance
@@ -149,14 +194,21 @@ vertex VertexOut vertex_standard(
 
     // Transform position: projection * modelview * position
     float4 world_pos = uniforms.modelview_matrix * float4(in.position, 1.0);
-    out.position = uniforms.projection_matrix * world_pos;
+    out.position = to_metal_clip_space(uniforms.projection_matrix * world_pos);
 
     // Pass through texture coordinates, transformed by texture matrix
     float4 tex_transformed = uniforms.texture_matrix * float4(in.texcoord, 0.0, 1.0);
+#if DEBUG_BYPASS_TEXTURE_MATRIX
+    out.texcoord = in.texcoord;
+#else
     out.texcoord = tex_transformed.xy;
+#endif
+    out.light_texcoord = decode_light_texcoord(in.texcoord2, uniforms);
 
-    // Convert colour from RGBA8 (0-255) to float4 (0.0-1.0), apply tint
-    out.colour = float4(in.colour) / 255.0 * uniforms.colour_tint;
+    out.colour = decode_standard_vertex_colour(in.colour, uniforms);
+#if DEBUG_VISUALIZE_VERTEX_PATH
+    out.colour = float4(0.0, 1.0, 0.0, 1.0);
+#endif
 
     // Unpack signed normal from bytes (-128..127 -> -1.0..1.0)
     out.normal = float3(in.normal.xyz) / 127.0;
@@ -177,13 +229,18 @@ vertex VertexOut vertex_lit(
     VertexOut out;
 
     float4 world_pos = uniforms.modelview_matrix * float4(in.position, 1.0);
-    out.position = uniforms.projection_matrix * world_pos;
+    out.position = to_metal_clip_space(uniforms.projection_matrix * world_pos);
 
     float4 tex_transformed = uniforms.texture_matrix * float4(in.texcoord, 0.0, 1.0);
+#if DEBUG_BYPASS_TEXTURE_MATRIX
+    out.texcoord = in.texcoord;
+#else
     out.texcoord = tex_transformed.xy;
+#endif
+    out.light_texcoord = decode_light_texcoord(in.texcoord2, uniforms);
 
     // Decode colour and normal
-    float4 base_colour = float4(in.colour) / 255.0 * uniforms.colour_tint;
+    float4 base_colour = decode_standard_vertex_colour(in.colour, uniforms);
     float3 normal_vec = float3(in.normal.xyz) / 127.0;
 
     // Transform normal into eye space for lighting
@@ -192,6 +249,9 @@ vertex VertexOut vertex_lit(
     // Apply lighting in vertex shader
     out.colour = apply_lighting(eye_normal, base_colour, uniforms);
     out.normal = eye_normal;
+#if DEBUG_VISUALIZE_VERTEX_PATH
+    out.colour = float4(0.0, 0.0, 1.0, 1.0);
+#endif
 
     out.fog_factor = compute_fog_factor(world_pos.z, uniforms);
 
@@ -208,7 +268,7 @@ vertex VertexOut vertex_texgen(
     VertexOut out;
 
     float4 world_pos = uniforms.modelview_matrix * float4(in.position, 1.0);
-    out.position = uniforms.projection_matrix * world_pos;
+    out.position = to_metal_clip_space(uniforms.projection_matrix * world_pos);
 
     // Generate texture coordinates from texgen planes
     float4 source_pos;
@@ -224,9 +284,17 @@ vertex VertexOut vertex_texgen(
     float gen_t = dot(uniforms.texgen_col[1], source_pos);
 
     float4 tex_transformed = uniforms.texture_matrix * float4(gen_s, gen_t, 0.0, 1.0);
+#if DEBUG_BYPASS_TEXTURE_MATRIX
+    out.texcoord = float2(gen_s, gen_t);
+#else
     out.texcoord = tex_transformed.xy;
+#endif
+    out.light_texcoord = decode_light_texcoord(in.texcoord2, uniforms);
 
-    out.colour = float4(in.colour) / 255.0 * uniforms.colour_tint;
+    out.colour = decode_standard_vertex_colour(in.colour, uniforms);
+#if DEBUG_VISUALIZE_VERTEX_PATH
+    out.colour = float4(1.0, 1.0, 0.0, 1.0);
+#endif
     out.normal = float3(in.normal.xyz) / 127.0;
 
     out.fog_factor = compute_fog_factor(world_pos.z, uniforms);
@@ -244,33 +312,36 @@ vertex VertexOut vertex_compressed(
 {
     VertexOut out;
 
-    // Unpack position from short4 (xyz in .xyz, texU encoded in .w)
-    // Scale factor for compressed positions (1/16 for sub-block precision)
-    float3 pos = float3(in.position_packed.xyz) / 16.0;
+    // Tesselator writes x/y/z as signed 16-bit values scaled by 1024.
+    float3 pos = float3(in.position_and_colour.xyz) / 1024.0;
     float4 world_pos = uniforms.modelview_matrix * float4(pos, 1.0);
-    out.position = uniforms.projection_matrix * world_pos;
+    out.position = to_metal_clip_space(uniforms.projection_matrix * world_pos);
 
-    // Unpack texture coordinates from packed shorts
-    float tex_u = float(in.position_packed.w) / 32768.0;
-    float tex_v = float(in.data_packed.x) / 32768.0;
+    // Primary UVs are signed 16-bit values scaled by 8192.
+    float tex_u = float(in.uv_and_aux.x) / 8192.0;
+    float tex_v = float(in.uv_and_aux.y) / 8192.0;
 
     float4 tex_transformed = uniforms.texture_matrix * float4(tex_u, tex_v, 0.0, 1.0);
+#if DEBUG_BYPASS_TEXTURE_MATRIX
+    out.texcoord = float2(tex_u, tex_v);
+#else
     out.texcoord = tex_transformed.xy;
+#endif
+    out.light_texcoord = decode_light_texcoord(in.uv_and_aux.zw, uniforms);
 
-    // Unpack colour from data_packed.y (RGBA4444 or similar encoding)
-    // For compressed format, colour is typically white with alpha
-    uint packed_colour = uint(in.data_packed.y) & 0xFFFF;
-    float red   = float((packed_colour >> 12) & 0xF) / 15.0;
-    float green = float((packed_colour >> 8)  & 0xF) / 15.0;
-    float blue  = float((packed_colour >> 4)  & 0xF) / 15.0;
-    float alpha = float((packed_colour >> 0)  & 0xF) / 15.0;
-    out.colour = float4(red, green, blue, alpha) * uniforms.colour_tint;
+    // Colour is packed as RGB565. Alpha is implicit for this path.
+    uint packed_colour_biased = uint(as_type<ushort>(in.position_and_colour.w));
+    ushort packed_colour = ushort((packed_colour_biased + 32768u) & 0xFFFFu);
+    float red = float((packed_colour >> 11) & 0x1F) / 31.0;
+    float green = float((packed_colour >> 5) & 0x3F) / 63.0;
+    float blue = float(packed_colour & 0x1F) / 31.0;
+    out.colour = float4(red, green, blue, 1.0) * uniforms.colour_tint;
+#if DEBUG_VISUALIZE_VERTEX_PATH
+    out.colour = float4(1.0, 0.0, 0.0, 1.0);
+#endif
 
-    // Unpack normal from data_packed.zw
-    float nx = float(int8_t(in.data_packed.z & 0xFF)) / 127.0;
-    float ny = float(int8_t((in.data_packed.z >> 8) & 0xFF)) / 127.0;
-    float nz = float(int8_t(in.data_packed.w & 0xFF)) / 127.0;
-    out.normal = float3(nx, ny, nz);
+    // This compact path does not carry normals; leave lighting neutral.
+    out.normal = float3(0.0, 0.0, 1.0);
 
     out.fog_factor = compute_fog_factor(world_pos.z, uniforms);
 
@@ -285,13 +356,31 @@ fragment float4 fragment_standard(
     VertexOut in [[stage_in]],
     constant Uniforms &uniforms [[buffer(1)]],
     texture2d<float> tex [[texture(0)]],
+    texture2d<float> light_tex [[texture(1)]],
     sampler tex_sampler [[sampler(0)]])
 {
+#if DEBUG_VISUALIZE_SOLID_WHITE
+    return float4(1.0, 1.0, 1.0, 1.0);
+#else
+#if DEBUG_VISUALIZE_VERTEX_PATH
+    return in.colour;
+#endif
     // Sample texture
-    float4 tex_colour = tex.sample(tex_sampler, in.texcoord);
+    float4 tex_colour = sample_game_texture(tex, tex_sampler, in.texcoord);
 
+#if DEBUG_VISUALIZE_UV_GRADIENT
+    float2 uv = fract(in.texcoord);
+    float4 final_colour = float4(uv.x, uv.y, 0.0, 1.0);
+#elif DEBUG_VISUALIZE_BASE_TEXTURE
+    float4 final_colour = float4(tex_colour.rgb, 1.0);
+#else
     // Multiply texture colour by vertex colour
     float4 final_colour = tex_colour * in.colour;
+
+    if (!DEBUG_DISABLE_LIGHT_TEXTURE && light_tex.get_width() > 0) {
+        final_colour.rgb *= light_tex.sample(tex_sampler, in.light_texcoord).rgb;
+    }
+#endif
 
     // Alpha test: discard fragments that fail the comparison
     if (uniforms.alpha_test_enable) {
@@ -316,11 +405,12 @@ fragment float4 fragment_standard(
     }
 
     // Apply fog: blend between final colour and fog colour
-    if (uniforms.fog_enable) {
+    if (!DEBUG_DISABLE_FOG && uniforms.fog_enable && !DEBUG_VISUALIZE_BASE_TEXTURE) {
         final_colour.rgb = mix(uniforms.fog_colour.rgb, final_colour.rgb, in.fog_factor);
     }
 
     return final_colour;
+#endif
 }
 
 // ------------------------------------------------------------------
@@ -348,7 +438,7 @@ fragment float4 fragment_untextured(
     }
 
     // Fog
-    if (uniforms.fog_enable) {
+    if (!DEBUG_DISABLE_FOG && uniforms.fog_enable && !DEBUG_VISUALIZE_BASE_TEXTURE) {
         final_colour.rgb = mix(uniforms.fog_colour.rgb, final_colour.rgb, in.fog_factor);
     }
 
@@ -362,11 +452,29 @@ fragment float4 fragment_projection(
     VertexOut in [[stage_in]],
     constant Uniforms &uniforms [[buffer(1)]],
     texture2d<float> tex [[texture(0)]],
+    texture2d<float> light_tex [[texture(1)]],
     sampler tex_sampler [[sampler(0)]])
 {
+#if DEBUG_VISUALIZE_SOLID_WHITE
+    return float4(1.0, 1.0, 1.0, 1.0);
+#else
+#if DEBUG_VISUALIZE_VERTEX_PATH
+    return in.colour;
+#endif
     // Project texture coordinates (perspective divide already handled by vertex shader)
-    float4 tex_colour = tex.sample(tex_sampler, in.texcoord);
+    float4 tex_colour = sample_game_texture(tex, tex_sampler, in.texcoord);
+#if DEBUG_VISUALIZE_UV_GRADIENT
+    float2 uv = fract(in.texcoord);
+    float4 final_colour = float4(uv.x, uv.y, 0.0, 1.0);
+#elif DEBUG_VISUALIZE_BASE_TEXTURE
+    float4 final_colour = float4(tex_colour.rgb, 1.0);
+#else
     float4 final_colour = tex_colour * in.colour;
+
+    if (!DEBUG_DISABLE_LIGHT_TEXTURE && light_tex.get_width() > 0) {
+        final_colour.rgb *= light_tex.sample(tex_sampler, in.light_texcoord).rgb;
+    }
+#endif
 
     if (uniforms.alpha_test_enable) {
         if (final_colour.a <= uniforms.alpha_test_ref) {
@@ -374,11 +482,12 @@ fragment float4 fragment_projection(
         }
     }
 
-    if (uniforms.fog_enable) {
+    if (!DEBUG_DISABLE_FOG && uniforms.fog_enable && !DEBUG_VISUALIZE_BASE_TEXTURE) {
         final_colour.rgb = mix(uniforms.fog_colour.rgb, final_colour.rgb, in.fog_factor);
     }
 
     return final_colour;
+#endif
 }
 
 // ------------------------------------------------------------------
@@ -388,11 +497,33 @@ fragment float4 fragment_force_lod(
     VertexOut in [[stage_in]],
     constant Uniforms &uniforms [[buffer(1)]],
     texture2d<float> tex [[texture(0)]],
+    texture2d<float> light_tex [[texture(1)]],
     sampler tex_sampler [[sampler(0)]])
 {
+#if DEBUG_VISUALIZE_SOLID_WHITE
+    return float4(1.0, 1.0, 1.0, 1.0);
+#else
+#if DEBUG_VISUALIZE_VERTEX_PATH
+    return in.colour;
+#endif
     // Sample at a forced mip level
-    float4 tex_colour = tex.sample(tex_sampler, in.texcoord, level(float(uniforms.force_lod)));
+    float2 sample_uv = in.texcoord;
+    if (sample_uv.x > 1.0) {
+        sample_uv.x -= 1.0;
+    }
+    float4 tex_colour = tex.sample(tex_sampler, sample_uv, level(float(uniforms.force_lod)));
+#if DEBUG_VISUALIZE_UV_GRADIENT
+    float2 uv = fract(in.texcoord);
+    float4 final_colour = float4(uv.x, uv.y, 0.0, 1.0);
+#elif DEBUG_VISUALIZE_BASE_TEXTURE
+    float4 final_colour = float4(tex_colour.rgb, 1.0);
+#else
     float4 final_colour = tex_colour * in.colour;
+
+    if (!DEBUG_DISABLE_LIGHT_TEXTURE && light_tex.get_width() > 0) {
+        final_colour.rgb *= light_tex.sample(tex_sampler, in.light_texcoord).rgb;
+    }
+#endif
 
     if (uniforms.alpha_test_enable) {
         if (final_colour.a <= uniforms.alpha_test_ref) {
@@ -400,9 +531,10 @@ fragment float4 fragment_force_lod(
         }
     }
 
-    if (uniforms.fog_enable) {
+    if (!DEBUG_DISABLE_FOG && uniforms.fog_enable) {
         final_colour.rgb = mix(uniforms.fog_colour.rgb, final_colour.rgb, in.fog_factor);
     }
 
     return final_colour;
+#endif
 }

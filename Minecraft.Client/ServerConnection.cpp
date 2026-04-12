@@ -74,6 +74,12 @@ void ServerConnection::stop()
 
 void ServerConnection::tick()
 {
+	static int s_serverTickLogs = 0;
+	if (s_serverTickLogs < 12)
+	{
+		app.DebugPrintf("ServerConnection::tick pending=%zu players=%zu\n", pending.size(), players.size());
+		++s_serverTickLogs;
+	}
 	{
 		// MGH - changed this so that the the CS lock doesn't cover the tick (was causing a lockup when 2 players tried to join)
 		EnterCriticalSection(&pending_cs);

@@ -34,6 +34,36 @@ public:
 
     // Per-frame rendering of all Iggy/Flash UI scenes
     virtual void render() override;
+    virtual void StartReloadSkinThread() override;
+    virtual bool IsReloadingSkin() override;
+    virtual void CleanUpSkinReload() override;
+    virtual bool NavigateToScene(int iPad, EUIScene scene, void *initData = nullptr, EUILayer layer = eUILayer_Scene, EUIGroup group = eUIGroup_PAD) override;
+    virtual bool NavigateBack(int iPad, bool forceUsePad = false, EUIScene eScene = eUIScene_COUNT, EUILayer eLayer = eUILayer_COUNT) override;
+    virtual void CloseUIScenes(int iPad, bool forceIPad = false) override;
+    virtual void CloseAllPlayersScenes() override;
+    virtual bool IsPauseMenuDisplayed(int iPad) override;
+    virtual bool IsContainerMenuDisplayed(int iPad) override;
+    virtual bool IsIgnorePlayerJoinMenuDisplayed(int iPad) override;
+    virtual bool IsIgnoreAutosaveMenuDisplayed(int iPad) override;
+    virtual void SetIgnoreAutosaveMenuDisplayed(int iPad, bool displayed) override;
+    virtual bool IsSceneInStack(int iPad, EUIScene eScene) override;
+    virtual bool GetMenuDisplayed(int iPad) override;
+    virtual void CheckMenuDisplayed() override;
+    virtual void HandleGameTick() override;
+    virtual void SetTooltipText(unsigned int iPad, unsigned int tooltip, int iTextID) override;
+    virtual void SetEnableTooltips(unsigned int iPad, BOOL bVal) override;
+    virtual void ShowTooltip(unsigned int iPad, unsigned int tooltip, bool show) override;
+    virtual void SetTooltips(unsigned int iPad, int iA, int iB = -1, int iX = -1, int iY = -1, int iLT = -1, int iRT = -1, int iLB = -1, int iRB = -1, int iLS = -1, int iRS = -1, int iBack = -1, bool forceUpdate = false) override;
+    virtual void EnableTooltip(unsigned int iPad, unsigned int tooltip, bool enable) override;
+    virtual void RefreshTooltips(unsigned int iPad) override;
+    virtual void DisplayGamertag(unsigned int iPad, bool show) override;
+    virtual void SetSelectedItem(unsigned int iPad, const wstring &name) override;
+    virtual void UpdateSelectedItemPos(unsigned int iPad) override;
+    virtual void SetTutorial(int iPad, Tutorial *tutorial) override;
+    virtual void SetTutorialDescription(int iPad, TutorialPopupInfo *info) override;
+    virtual void RemoveInteractSceneReference(int iPad, UIScene *scene) override;
+    virtual void SetTutorialVisible(int iPad, bool visible) override;
+    virtual bool IsTutorialVisible(int iPad) override;
 
     // Iggy custom draw callbacks (stubs until GDraw Metal is integrated)
     void beginIggyCustomDraw4J(IggyCustomDrawCallbackRegion* region, CustomDrawData* customDrawRegion) override;
@@ -53,7 +83,6 @@ public:
 
     // Override tick/render to be safe without Iggy
     virtual void tick() override;
-    void CheckMenuDisplayed();
 
 public:
     void shutdown();

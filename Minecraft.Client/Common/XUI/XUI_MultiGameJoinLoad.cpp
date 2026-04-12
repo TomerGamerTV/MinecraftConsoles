@@ -2077,8 +2077,10 @@ int CScene_MultiGameJoinLoad::UploadSaveForXboxOneThreadProc( LPVOID lpParameter
 		LPCWSTR title = StorageManager.GetSaveTitle();
 		dos.writeUTF(title);
 
-		char szUniqueMapName[14];
-		StorageManager.GetSaveUniqueFilename(szUniqueMapName);
+		char storageUniqueMapName[MAX_SAVEFILENAME_LENGTH] = {};
+		char szUniqueMapName[14] = {};
+		StorageManager.GetSaveUniqueFilename(storageUniqueMapName);
+		memcpy(szUniqueMapName, storageUniqueMapName, sizeof(szUniqueMapName));
 		dos.writeUTF(convStringToWstring(szUniqueMapName));
 
 		{

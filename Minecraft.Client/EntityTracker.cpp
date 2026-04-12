@@ -77,15 +77,11 @@ void EntityTracker::addEntity(shared_ptr<Entity> e, int range, int updateInterva
 void EntityTracker::addEntity(shared_ptr<Entity> e, int range, int updateInterval, bool trackDeltas)
 {
     if (range > maxRange) range = maxRange;
-    if (entityMap.find(e->entityId) != entityMap.end())
+	if (entityMap.find(e->entityId) != entityMap.end())
 	{
 		assert(false);	// Entity already tracked
 	}
-	if( e->entityId >= 2048 )
-	{
-		__debugbreak();
-	}
-    shared_ptr<TrackedEntity> te = std::make_shared<TrackedEntity>(e, range, updateInterval, trackDeltas);
+	shared_ptr<TrackedEntity> te = std::make_shared<TrackedEntity>(e, range, updateInterval, trackDeltas);
 	entities.insert(te);
     entityMap[e->entityId] = te;
     te->updatePlayers(this, &level->players);

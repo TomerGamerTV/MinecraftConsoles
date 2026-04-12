@@ -11,6 +11,7 @@
 #include "../../Minecraft.h"
 #include "../../User.h"
 #include "../../MinecraftServer.h"
+#include "../../ServerConnection.h"
 #include "../../PlayerList.h"
 #include "../../ServerPlayer.h"
 #include "../../PlayerConnection.h"
@@ -434,12 +435,27 @@ bool	CGameNetworkManager::StartNetworkGame(Minecraft *minecraft, LPVOID lpParame
 	{
 		app.DebugPrintf("ticking connection A\n");
 		connection->tick();
+		if (g_NetworkManager.IsHost())
+		{
+			MinecraftServer *server = MinecraftServer::getInstance();
+			if (server != nullptr && server->getConnection() != nullptr)
+			{
+				server->getConnection()->tick();
+			}
+		}
 
 		// 4J Stu - We were ticking this way too fast which could cause the connection to time out
 		// The connections should tick at 20 per second
 		Sleep(50);
 	} while ( (IsInSession() && !connection->isStarted() && !connection->isClosed() && !g_NetworkManager.IsLeavingGame()) || tPack->isLoadingData() || (Minecraft::GetInstance()->skins->needsUIUpdate() || ui.IsReloadingSkin()) );
 	ui.CleanUpSkinReload();
+	app.DebugPrintf("StartNetworkGame primary loop exit: inSession=%d started=%d closed=%d leaving=%d tpackLoading=%d skinUI=%d\n",
+		IsInSession() ? 1 : 0,
+		connection->isStarted() ? 1 : 0,
+		connection->isClosed() ? 1 : 0,
+		g_NetworkManager.IsLeavingGame() ? 1 : 0,
+		tPack->isLoadingData() ? 1 : 0,
+		(Minecraft::GetInstance()->skins->needsUIUpdate() || ui.IsReloadingSkin()) ? 1 : 0);
 
 	// 4J Stu - Fix for #11279 - CRASH: TCR 001: BAS Game Stability: Signing out of game will cause title to crash
 	// We need to break out of the above loop if m_bLeavingGame is set, and close the connection
@@ -919,6 +935,11 @@ int CGameNetworkManager::RunNetworkGameThreadProc( void* lpParameter )
 	g_NetworkManager.m_bNetworkThreadRunning = true;
 	bool success = g_NetworkManager._RunNetworkGame(lpParameter);
 	g_NetworkManager.m_bNetworkThreadRunning = false;
+	app.DebugPrintf("RunNetworkGameThreadProc success=%d disconnectReason=%d gameStarted=%d inSession=%d\n",
+		success ? 1 : 0,
+		(int)app.GetDisconnectReason(),
+		app.GetGameStarted() ? 1 : 0,
+		g_NetworkManager.IsInSession() ? 1 : 0);
 	if( !success)
 	{
 		TexturePack *tPack = Minecraft::GetInstance()->skins->getSelected();

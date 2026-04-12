@@ -275,6 +275,15 @@ int Socket::SocketInputStreamLocal::read()
 			{
 				byte retval = s_hostQueue[m_queueIdx].front();
 				s_hostQueue[m_queueIdx].pop();
+				static int s_localReadLogs = 0;
+				if (s_localReadLogs < 16)
+				{
+					app.DebugPrintf("LOCAL SOCKET READ: queue=%d byte=0x%02X remaining=%zu\n",
+						m_queueIdx,
+						retval,
+						s_hostQueue[m_queueIdx].size());
+					++s_localReadLogs;
+				}
 				LeaveCriticalSection(&s_hostQueueLock[m_queueIdx]);
 				return retval;
 			}
@@ -353,6 +362,12 @@ void Socket::SocketOutputStreamLocal::write(byteArray b, unsigned int offset, un
 	if( m_streamOpen != true )
 	{
 		return;
+	}
+	static int s_localWriteLogs = 0;
+	if (s_localWriteLogs < 8)
+	{
+		app.DebugPrintf("LOCAL SOCKET WRITE: queue=%d length=%u\n", m_queueIdx, length);
+		++s_localWriteLogs;
 	}
 	MemSect(12);
 	EnterCriticalSection(&s_hostQueueLock[m_queueIdx]);

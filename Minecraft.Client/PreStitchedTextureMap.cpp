@@ -202,6 +202,14 @@ void PreStitchedTextureMap::makeTextureAnimated(TexturePack *texturePack, Stitch
 {
 	if(!tex->hasOwnData())
 	{
+		// Shared clock/compass variants reuse another texture's frame data, but they
+		// still need their own atlas placement initialised so cycleFrames() blits
+		// into the correct slot instead of the default (0,0).
+		int x = tex->getU0() * stitchResult->getWidth();
+		int y = tex->getV0() * stitchResult->getHeight();
+		int width = (tex->getU1() * stitchResult->getWidth()) - x;
+		int height = (tex->getV1() * stitchResult->getHeight()) - y;
+		tex->init(stitchResult, nullptr, x, y, width, height, false);
 		animatedTextures.push_back(tex);
 		return;
 	}

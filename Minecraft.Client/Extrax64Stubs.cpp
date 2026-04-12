@@ -273,8 +273,9 @@ static bool Win64_IsActivePlayer(IQNetPlayer* p, DWORD index);
 
 HRESULT IQNet::AddLocalPlayerByUserIndex(DWORD dwUserIndex) {
 	if (dwUserIndex >= MINECRAFT_NET_MAX_PLAYERS) return E_FAIL;
+	m_player[dwUserIndex].m_smallId = static_cast<BYTE>(dwUserIndex);
 	m_player[dwUserIndex].m_isRemote = false;
-	m_player[dwUserIndex].m_isHostPlayer = false;
+	m_player[dwUserIndex].m_isHostPlayer = (s_isHosting && dwUserIndex == 0);
 	// Give the joining player a distinct gamertag
 	extern wchar_t g_Win64UsernameW[17];
 	if (dwUserIndex == 0)
@@ -379,6 +380,9 @@ void IQNet::HostGame()
 {
 	_iQNetStubState = QNET_STATE_SESSION_STARTING;
 	s_isHosting = true;
+	m_player[0].m_smallId = 0;
+	m_player[0].m_isRemote = false;
+	m_player[0].m_isHostPlayer = true;
 	// Host slot keeps legacy XUID so old host player data remains addressable.
 #ifdef _WINDOWS64
 	m_player[0].m_resolvedXuid = Win64Xuid::GetLegacyEmbeddedHostXuid();

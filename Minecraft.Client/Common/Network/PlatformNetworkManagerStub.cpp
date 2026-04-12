@@ -3,14 +3,16 @@
 #include "../../../Minecraft.World/StringHelpers.h"
 #include "PlatformNetworkManagerStub.h"
 #include "../../Xbox/Network/NetworkPlayerXbox.h"
-#ifdef _WINDOWS64
-#include "../../Windows64/Network/WinsockNetLayer.h"
-#include "../../Windows64/Windows64_Xuid.h"
 #include "../../Minecraft.h"
 #include "../../User.h"
 #include "../../MinecraftServer.h"
 #include "../../PlayerList.h"
 #include <iostream>
+#ifdef _WINDOWS64
+#include "../../Windows64/Network/WinsockNetLayer.h"
+#include "../../Windows64/Windows64_Xuid.h"
+#elif defined(_APPLE_PLATFORM)
+#include "../../Apple/Network/BSDNetLayer.h"
 #endif
 
 CPlatformNetworkManagerStub *g_pPlatformNetworkManager;
@@ -220,20 +222,31 @@ bool CPlatformNetworkManagerStub::isSystemPrimaryPlayer(IQNetPlayer *pQNetPlayer
 // We call this twice a frame, either side of the render call so is a good place to "tick" things
 void CPlatformNetworkManagerStub::DoWork()
 {
-#ifdef _WINDOWS64
+#if defined(_WINDOWS64) || defined(_APPLE_PLATFORM)
 	extern QNET_STATE _iQNetStubState;
 	if (_iQNetStubState == QNET_STATE_SESSION_STARTING && app.GetGameStarted())
 	{
 		_iQNetStubState = QNET_STATE_GAME_PLAY;
+#ifdef _WINDOWS64
 		if (m_pIQNet->IsHost())
 			WinsockNetLayer::UpdateAdvertiseJoinable(true);
+#else
+		if (m_pIQNet->IsHost())
+			BSDNetLayer::UpdateAdvertiseJoinable(true);
+#endif
 	}
+#ifdef _WINDOWS64
 	if (_iQNetStubState == QNET_STATE_IDLE)
 		TickSearch();
+#endif
 	if (_iQNetStubState == QNET_STATE_GAME_PLAY && m_pIQNet->IsHost())
 	{
 		BYTE disconnectedSmallId;
+#ifdef _WINDOWS64
 		while (WinsockNetLayer::PopDisconnectedSmallId(&disconnectedSmallId))
+#else
+		while (BSDNetLayer::PopDisconnectedSmallId(&disconnectedSmallId))
+#endif
 		{
 			IQNetPlayer* qnetPlayer = m_pIQNet->GetPlayerBySmallId(disconnectedSmallId);
 			if (qnetPlayer != nullptr && qnetPlayer->m_smallId == disconnectedSmallId)
@@ -274,7 +287,11 @@ void CPlatformNetworkManagerStub::DoWork()
 	// The processing from the Xbox version will be reused.
 	if (_iQNetStubState == QNET_STATE_GAME_PLAY && !m_pIQNet->IsHost() && !m_bLeavingGame)
 	{
+#ifdef _WINDOWS64
 		if (!WinsockNetLayer::IsConnected())
+#else
+		if (!BSDNetLayer::IsConnected())
+#endif
 		{
 			if (!m_bLeaveGameOnTick)
 			{
@@ -288,6 +305,7 @@ void CPlatformNetworkManagerStub::DoWork()
 		}
 	}
 
+	#ifdef _WINDOWS64
 	if (m_bJoinPending)
 	{
 		WinsockNetLayer::eJoinState state = WinsockNetLayer::GetJoinState();
@@ -319,6 +337,7 @@ void CPlatformNetworkManagerStub::DoWork()
 			m_bJoinPending = false;
 		}
 	}
+	#endif
 #endif
 }
 
@@ -604,7 +623,7 @@ void CPlatformNetworkManagerStub::HandleSignInChange()
 
 bool CPlatformNetworkManagerStub::_RunNetworkGame()
 {
-#ifdef _WINDOWS64
+#if defined(_WINDOWS64) || defined(_APPLE_PLATFORM)
 	extern QNET_STATE _iQNetStubState;
 	_iQNetStubState = QNET_STATE_GAME_PLAY;
 

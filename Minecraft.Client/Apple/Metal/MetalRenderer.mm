@@ -26,18 +26,19 @@
 // Maximum number of textures the renderer can manage
 static const int MAX_TEXTURES = 4096;
 
-// Maximum number of command buffer recordings
-static const int MAX_COMMAND_BUFFERS = 256;
-
 // Matrix stack depth limit
 static const int MAX_MATRIX_STACK_DEPTH = 32;
 
 // Number of directional lights
 static const int MAX_LIGHTS = 2;
 
-// Vertex stride for standard vertex type: pos(12) + tex(8) + col(4) + norm(4) + pad(4) = 32
-// Actually the spec says 36 bytes: pos(12) + tex(8) + col(4) + norm(4) + pad(4) + extra(4)
-static const int VERTEX_STRIDE_STANDARD = 36;
+// Standard vertices are written as 8 DWORDs by the tesselator:
+// pos(12) + tex(8) + colour(4) + normal(4) + tex2/light(4) = 32 bytes.
+static const int VERTEX_STRIDE_STANDARD = 32;
+
+// Metal's set*Bytes path is intended for small inline uploads. Larger draws
+// should use a real MTLBuffer or the driver can become unstable on Apple GPUs.
+static const NSUInteger MAX_INLINE_VERTEX_UPLOAD_BYTES = 4096;
 
 // ------------------------------------------------------------------
 // Uniform buffer structure (must match MetalShaders.metal)
@@ -121,6 +122,7 @@ struct CommandBufferRecord {
     std::vector<RecordedDrawCommand> commands;
     bool in_use;
     bool is_static;
+    simd_float4x4 recorded_base_matrices[3];
 };
 
 // ------------------------------------------------------------------
@@ -150,6 +152,11 @@ struct MetalRendererImpl {
     id<MTLDepthStencilState> depth_stencil_disabled;
     id<MTLDepthStencilState> depth_stencil_read_only;  // Test enabled, write disabled
     id<MTLDepthStencilState> depth_stencil_custom;     // Dynamic based on current state
+    int depth_stencil_custom_depth_func;
+    bool depth_stencil_custom_depth_write_enabled;
+    int depth_stencil_custom_stencil_func;
+    uint8_t depth_stencil_custom_stencil_func_mask;
+    uint8_t depth_stencil_custom_stencil_write_mask;
 
     // Sampler states (nearest, linear, nearest-clamp, linear-clamp, etc.)
     id<MTLSamplerState> sampler_nearest_repeat;
@@ -190,7 +197,8 @@ struct MetalRendererImpl {
     int texture_levels_hint;        // Mip levels for next texture creation
 
     // Command buffer recording
-    CommandBufferRecord command_buffers[MAX_COMMAND_BUFFERS];
+    std::vector<CommandBufferRecord> command_buffers;
+    int next_command_buffer_index;
     int recording_command_buffer;   // -1 if not recording
     bool command_buffers_locked;
     bool deferred_mode;
@@ -217,6 +225,66 @@ C4JRender RenderManager;
 
 // The private implementation pointer (allocated on Initialise)
 static MetalRendererImpl *g_impl = nullptr;
+
+// Display-list compilation can happen on chunk rebuild threads while the main
+// thread is actively rendering. Keep the recording target per-thread so a
+// worker compiling a list cannot fall through into the live frame encoder when
+// another thread ends its own recording session.
+static thread_local int g_recording_command_buffer_tls = -1;
+
+struct ThreadLocalMatrixState {
+    simd_float4x4 current[3];
+    std::stack<simd_float4x4> stack[3];
+    int mode;
+    bool initialised;
+};
+
+static thread_local ThreadLocalMatrixState g_recording_matrix_state = {};
+
+// Lightweight frame stats for debugging blank-output issues.
+static int g_frame_index = 0;
+static int g_frame_draw_calls = 0;
+static int g_frame_compressed_draw_calls = 0;
+static int g_frame_standard_draw_calls = 0;
+static int g_frame_draw_vertices = 0;
+static int g_frame_boundless_draw_calls = 0;
+static const bool kDebugSkipStandardDraws = false;
+static const bool kDebugDisableCulling = false;
+
+static inline bool use_recording_matrix_state()
+{
+    return g_recording_command_buffer_tls >= 0 && g_recording_matrix_state.initialised;
+}
+
+static inline ThreadLocalMatrixState *get_active_matrix_state()
+{
+    if (use_recording_matrix_state()) {
+        return &g_recording_matrix_state;
+    }
+    return nullptr;
+}
+
+struct DebugStandardVertex {
+    float x;
+    float y;
+    float z;
+    float u;
+    float v;
+    uint32_t colour;
+    uint32_t normal;
+    uint32_t tex2;
+};
+
+struct DebugCompressedVertex {
+    int16_t x;
+    int16_t y;
+    int16_t z;
+    int16_t colour;
+    int16_t u;
+    int16_t v;
+    int16_t tex2u;
+    int16_t tex2v;
+};
 
 // ------------------------------------------------------------------
 // Helper: create a 4x4 identity matrix using simd
@@ -405,7 +473,7 @@ static int get_vertex_stride(C4JRender::eVertexType vertex_type)
         case C4JRender::VERTEX_TYPE_PF3_TF2_CB4_NB4_XW1:
         case C4JRender::VERTEX_TYPE_PF3_TF2_CB4_NB4_XW1_LIT:
         case C4JRender::VERTEX_TYPE_PF3_TF2_CB4_NB4_XW1_TEXGEN:
-            return 36;
+            return VERTEX_STRIDE_STANDARD;
         case C4JRender::VERTEX_TYPE_COMPRESSED:
             return 16; // Compressed: 2 x short4 = 16 bytes
         default:
@@ -520,8 +588,13 @@ static MTLVertexDescriptor *create_vertex_descriptor(C4JRender::eVertexType vert
             desc.attributes[3].offset = 24;
             desc.attributes[3].bufferIndex = 0;
 
-            // Layout: stride 36 bytes
-            desc.layouts[0].stride = 36;
+            // Secondary/lightmap UVs packed as 2 x int16 at offset 28.
+            desc.attributes[4].format = MTLVertexFormatShort2;
+            desc.attributes[4].offset = 28;
+            desc.attributes[4].bufferIndex = 0;
+
+            // Layout: stride 32 bytes
+            desc.layouts[0].stride = VERTEX_STRIDE_STANDARD;
             desc.layouts[0].stepRate = 1;
             desc.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
             break;
@@ -704,9 +777,15 @@ static void create_depth_texture(MetalRendererImpl *impl, int width, int height)
 // ------------------------------------------------------------------
 static void sync_uniforms(MetalRendererImpl *impl)
 {
-    impl->uniforms.modelview_matrix = impl->matrix_current[0];
-    impl->uniforms.projection_matrix = impl->matrix_current[1];
-    impl->uniforms.texture_matrix = impl->matrix_current[2];
+    if (ThreadLocalMatrixState *tls = get_active_matrix_state()) {
+        impl->uniforms.modelview_matrix = tls->current[0];
+        impl->uniforms.projection_matrix = tls->current[1];
+        impl->uniforms.texture_matrix = tls->current[2];
+    } else {
+        impl->uniforms.modelview_matrix = impl->matrix_current[0];
+        impl->uniforms.projection_matrix = impl->matrix_current[1];
+        impl->uniforms.texture_matrix = impl->matrix_current[2];
+    }
     impl->uniforms.gamma = impl->gamma_value;
 }
 
@@ -764,8 +843,15 @@ static id<MTLDepthStencilState> get_current_depth_stencil_state(MetalRendererImp
         return impl->depth_stencil_read_only;
     }
 
-    // For custom depth functions, create on the fly
-    // (In production, these should be cached)
+    if (impl->depth_stencil_custom != nil &&
+        impl->depth_stencil_custom_depth_func == impl->depth_func &&
+        impl->depth_stencil_custom_depth_write_enabled == impl->depth_write_enabled &&
+        impl->depth_stencil_custom_stencil_func == impl->stencil_func &&
+        impl->depth_stencil_custom_stencil_func_mask == impl->stencil_func_mask &&
+        impl->depth_stencil_custom_stencil_write_mask == impl->stencil_write_mask) {
+        return impl->depth_stencil_custom;
+    }
+
     MTLDepthStencilDescriptor *desc = [[MTLDepthStencilDescriptor alloc] init];
     desc.depthCompareFunction = convert_compare_func(impl->depth_func);
     desc.depthWriteEnabled = impl->depth_write_enabled ? YES : NO;
@@ -781,9 +867,23 @@ static id<MTLDepthStencilState> get_current_depth_stencil_state(MetalRendererImp
         stencil_desc.depthStencilPassOperation = MTLStencilOperationReplace;
         desc.frontFaceStencil = stencil_desc;
         desc.backFaceStencil = stencil_desc;
+        [stencil_desc release];
     }
 
-    return [impl->device newDepthStencilStateWithDescriptor:desc];
+    if (impl->depth_stencil_custom != nil) {
+        [impl->depth_stencil_custom release];
+        impl->depth_stencil_custom = nil;
+    }
+
+    impl->depth_stencil_custom = [impl->device newDepthStencilStateWithDescriptor:desc];
+    impl->depth_stencil_custom_depth_func = impl->depth_func;
+    impl->depth_stencil_custom_depth_write_enabled = impl->depth_write_enabled;
+    impl->depth_stencil_custom_stencil_func = impl->stencil_func;
+    impl->depth_stencil_custom_stencil_func_mask = impl->stencil_func_mask;
+    impl->depth_stencil_custom_stencil_write_mask = impl->stencil_write_mask;
+
+    [desc release];
+    return impl->depth_stencil_custom;
 }
 
 // ------------------------------------------------------------------
@@ -808,7 +908,9 @@ static void apply_render_state(MetalRendererImpl *impl, C4JRender::eVertexType v
     [impl->current_encoder setStencilReferenceValue:impl->stencil_ref];
 
     // Face culling
-    if (impl->face_cull_enabled) {
+    if (kDebugDisableCulling) {
+        [impl->current_encoder setCullMode:MTLCullModeNone];
+    } else if (impl->face_cull_enabled) {
         if (impl->face_cull_cw) {
             [impl->current_encoder setCullMode:MTLCullModeFront];
         } else {
@@ -840,6 +942,8 @@ static void apply_render_state(MetalRendererImpl *impl, C4JRender::eVertexType v
     int vtex_idx = impl->bound_vertex_texture_index;
     if (vtex_idx >= 0 && vtex_idx < MAX_TEXTURES && impl->textures[vtex_idx].in_use) {
         [impl->current_encoder setVertexTexture:impl->textures[vtex_idx].texture atIndex:0];
+        [impl->current_encoder setFragmentTexture:impl->textures[vtex_idx].texture atIndex:1];
+        [impl->current_encoder setFragmentSamplerState:get_sampler_for_texture(impl, vtex_idx) atIndex:1];
     }
 
     // Viewport
@@ -925,100 +1029,164 @@ void C4JRender::UpdateGamma(unsigned short usGamma)
 void C4JRender::MatrixMode(int type)
 {
     if (!g_impl) return;
-    g_impl->matrix_mode = type; // 0=modelview, 1=projection, 2=texture
+    if (ThreadLocalMatrixState *tls = get_active_matrix_state()) {
+        tls->mode = type;
+    } else {
+        g_impl->matrix_mode = type; // 0=modelview, 1=projection, 2=texture
+    }
 }
 
 void C4JRender::MatrixSetIdentity()
 {
     if (!g_impl) return;
-    g_impl->matrix_current[g_impl->matrix_mode] = make_identity_matrix();
+    if (ThreadLocalMatrixState *tls = get_active_matrix_state()) {
+        tls->current[tls->mode] = make_identity_matrix();
+    } else {
+        g_impl->matrix_current[g_impl->matrix_mode] = make_identity_matrix();
+    }
     g_impl->matrix_dirty = true;
 }
 
 void C4JRender::MatrixTranslate(float x, float y, float z)
 {
     if (!g_impl) return;
-    int mode = g_impl->matrix_mode;
-    g_impl->matrix_current[mode] = matrix_multiply(
-        g_impl->matrix_current[mode],
-        make_translation_matrix(x, y, z));
+    if (ThreadLocalMatrixState *tls = get_active_matrix_state()) {
+        int mode = tls->mode;
+        tls->current[mode] = matrix_multiply(
+            tls->current[mode],
+            make_translation_matrix(x, y, z));
+    } else {
+        int mode = g_impl->matrix_mode;
+        g_impl->matrix_current[mode] = matrix_multiply(
+            g_impl->matrix_current[mode],
+            make_translation_matrix(x, y, z));
+    }
     g_impl->matrix_dirty = true;
 }
 
 void C4JRender::MatrixRotate(float angle, float x, float y, float z)
 {
     if (!g_impl) return;
-    int mode = g_impl->matrix_mode;
-    g_impl->matrix_current[mode] = matrix_multiply(
-        g_impl->matrix_current[mode],
-        make_rotation_matrix(angle, x, y, z));
+    if (ThreadLocalMatrixState *tls = get_active_matrix_state()) {
+        int mode = tls->mode;
+        tls->current[mode] = matrix_multiply(
+            tls->current[mode],
+            make_rotation_matrix(angle, x, y, z));
+    } else {
+        int mode = g_impl->matrix_mode;
+        g_impl->matrix_current[mode] = matrix_multiply(
+            g_impl->matrix_current[mode],
+            make_rotation_matrix(angle, x, y, z));
+    }
     g_impl->matrix_dirty = true;
 }
 
 void C4JRender::MatrixScale(float x, float y, float z)
 {
     if (!g_impl) return;
-    int mode = g_impl->matrix_mode;
-    g_impl->matrix_current[mode] = matrix_multiply(
-        g_impl->matrix_current[mode],
-        make_scale_matrix(x, y, z));
+    if (ThreadLocalMatrixState *tls = get_active_matrix_state()) {
+        int mode = tls->mode;
+        tls->current[mode] = matrix_multiply(
+            tls->current[mode],
+            make_scale_matrix(x, y, z));
+    } else {
+        int mode = g_impl->matrix_mode;
+        g_impl->matrix_current[mode] = matrix_multiply(
+            g_impl->matrix_current[mode],
+            make_scale_matrix(x, y, z));
+    }
     g_impl->matrix_dirty = true;
 }
 
 void C4JRender::MatrixPerspective(float fovy, float aspect, float zNear, float zFar)
 {
     if (!g_impl) return;
-    int mode = g_impl->matrix_mode;
-    g_impl->matrix_current[mode] = matrix_multiply(
-        g_impl->matrix_current[mode],
-        make_perspective_matrix(fovy, aspect, zNear, zFar));
+    if (ThreadLocalMatrixState *tls = get_active_matrix_state()) {
+        int mode = tls->mode;
+        tls->current[mode] = matrix_multiply(
+            tls->current[mode],
+            make_perspective_matrix(fovy, aspect, zNear, zFar));
+    } else {
+        int mode = g_impl->matrix_mode;
+        g_impl->matrix_current[mode] = matrix_multiply(
+            g_impl->matrix_current[mode],
+            make_perspective_matrix(fovy, aspect, zNear, zFar));
+    }
     g_impl->matrix_dirty = true;
 }
 
 void C4JRender::MatrixOrthogonal(float left, float right, float bottom, float top, float zNear, float zFar)
 {
     if (!g_impl) return;
-    int mode = g_impl->matrix_mode;
-    g_impl->matrix_current[mode] = matrix_multiply(
-        g_impl->matrix_current[mode],
-        make_ortho_matrix(left, right, bottom, top, zNear, zFar));
+    if (ThreadLocalMatrixState *tls = get_active_matrix_state()) {
+        int mode = tls->mode;
+        tls->current[mode] = matrix_multiply(
+            tls->current[mode],
+            make_ortho_matrix(left, right, bottom, top, zNear, zFar));
+    } else {
+        int mode = g_impl->matrix_mode;
+        g_impl->matrix_current[mode] = matrix_multiply(
+            g_impl->matrix_current[mode],
+            make_ortho_matrix(left, right, bottom, top, zNear, zFar));
+    }
     g_impl->matrix_dirty = true;
 }
 
 void C4JRender::MatrixPop()
 {
     if (!g_impl) return;
-    int mode = g_impl->matrix_mode;
-    if (!g_impl->matrix_stack[mode].empty()) {
-        g_impl->matrix_current[mode] = g_impl->matrix_stack[mode].top();
-        g_impl->matrix_stack[mode].pop();
-        g_impl->matrix_dirty = true;
+    if (ThreadLocalMatrixState *tls = get_active_matrix_state()) {
+        int mode = tls->mode;
+        if (!tls->stack[mode].empty()) {
+            tls->current[mode] = tls->stack[mode].top();
+            tls->stack[mode].pop();
+            g_impl->matrix_dirty = true;
+        }
+    } else {
+        int mode = g_impl->matrix_mode;
+        if (!g_impl->matrix_stack[mode].empty()) {
+            g_impl->matrix_current[mode] = g_impl->matrix_stack[mode].top();
+            g_impl->matrix_stack[mode].pop();
+            g_impl->matrix_dirty = true;
+        }
     }
 }
 
 void C4JRender::MatrixPush()
 {
     if (!g_impl) return;
-    int mode = g_impl->matrix_mode;
-    g_impl->matrix_stack[mode].push(g_impl->matrix_current[mode]);
+    if (ThreadLocalMatrixState *tls = get_active_matrix_state()) {
+        int mode = tls->mode;
+        tls->stack[mode].push(tls->current[mode]);
+    } else {
+        int mode = g_impl->matrix_mode;
+        g_impl->matrix_stack[mode].push(g_impl->matrix_current[mode]);
+    }
 }
 
 void C4JRender::MatrixMult(float *mat)
 {
     if (!g_impl || !mat) return;
-    int mode = g_impl->matrix_mode;
-
     // Interpret mat as a column-major 4x4 matrix (OpenGL convention)
     simd_float4x4 m;
     memcpy(&m, mat, sizeof(simd_float4x4));
 
-    g_impl->matrix_current[mode] = matrix_multiply(g_impl->matrix_current[mode], m);
+    if (ThreadLocalMatrixState *tls = get_active_matrix_state()) {
+        int mode = tls->mode;
+        tls->current[mode] = matrix_multiply(tls->current[mode], m);
+    } else {
+        int mode = g_impl->matrix_mode;
+        g_impl->matrix_current[mode] = matrix_multiply(g_impl->matrix_current[mode], m);
+    }
     g_impl->matrix_dirty = true;
 }
 
 const float *C4JRender::MatrixGet(int type)
 {
     if (!g_impl) return nullptr;
+    if (ThreadLocalMatrixState *tls = get_active_matrix_state()) {
+        return (const float *)&tls->current[type];
+    }
     // Return pointer to the raw float data of the requested matrix
     return (const float *)&g_impl->matrix_current[type];
 }
@@ -1134,10 +1302,8 @@ void C4JRender::Initialise(void *pDevice, void *pSwapChain)
     g_impl->recording_command_buffer = -1;
     g_impl->command_buffers_locked = false;
     g_impl->deferred_mode = false;
-    for (int i = 0; i < MAX_COMMAND_BUFFERS; i++) {
-        g_impl->command_buffers[i].in_use = false;
-        g_impl->command_buffers[i].is_static = false;
-    }
+    g_impl->command_buffers.clear();
+    g_impl->next_command_buffer_index = 0;
 
     g_impl->current_viewport = VIEWPORT_TYPE_FULLSCREEN;
     g_impl->suspended = false;
@@ -1176,16 +1342,34 @@ void C4JRender::InitialiseContext()
     // Metal does not have a separate device context like D3D11.
     // Pipeline states and command buffers serve that role.
     if (!g_impl) return;
+    g_recording_command_buffer_tls = -1;
 }
 
 void C4JRender::StartFrame()
 {
     if (!g_impl || g_impl->suspended) return;
 
+    ++g_frame_index;
+    g_frame_draw_calls = 0;
+    g_frame_compressed_draw_calls = 0;
+    g_frame_standard_draw_calls = 0;
+    g_frame_draw_vertices = 0;
+    g_frame_boundless_draw_calls = 0;
+
     // Check if drawable size changed (window resize)
     CGSize drawable_size = g_impl->metal_layer.drawableSize;
     int new_width = (int)drawable_size.width;
     int new_height = (int)drawable_size.height;
+
+    if (new_width <= 0 || new_height <= 0) {
+        static bool logged_zero_drawable = false;
+        if (!logged_zero_drawable) {
+            NSLog(@"[MetalRenderer] StartFrame: drawable size is %dx%d, waiting for a valid layer size",
+                  new_width, new_height);
+            logged_zero_drawable = true;
+        }
+        return;
+    }
 
     if (new_width != g_impl->screen_width || new_height != g_impl->screen_height) {
         g_impl->screen_width = new_width;
@@ -1219,6 +1403,16 @@ void C4JRender::Present()
     end_render_encoder(g_impl);
 
     if (g_impl->current_drawable && g_impl->current_command_buffer) {
+        if ((g_frame_index % 120) == 0) {
+            NSLog(@"[MetalRenderer] frame=%d draws=%d verts=%d compressed=%d standard=%d untextured=%d",
+                  g_frame_index,
+                  g_frame_draw_calls,
+                  g_frame_draw_vertices,
+                  g_frame_compressed_draw_calls,
+                  g_frame_standard_draw_calls,
+                  g_frame_boundless_draw_calls);
+        }
+
         // Schedule presentation
         [g_impl->current_command_buffer presentDrawable:g_impl->current_drawable];
 
@@ -1353,7 +1547,7 @@ void C4JRender::DrawVertices(ePrimitiveType PrimitiveType, int count, void *data
     if (!g_impl || !dataIn || count <= 0) return;
 
     // If recording a command buffer, store the draw command
-    if (g_impl->recording_command_buffer >= 0) {
+    if (g_recording_command_buffer_tls >= 0) {
         RecordedDrawCommand cmd;
         cmd.type = RecordedDrawCommand::CMD_DRAW_VERTICES;
         cmd.primitive_type = PrimitiveType;
@@ -1371,7 +1565,7 @@ void C4JRender::DrawVertices(ePrimitiveType PrimitiveType, int count, void *data
         sync_uniforms(g_impl);
         cmd.uniforms_snapshot = g_impl->uniforms;
 
-        g_impl->command_buffers[g_impl->recording_command_buffer].commands.push_back(cmd);
+        g_impl->command_buffers[g_recording_command_buffer_tls].commands.push_back(cmd);
         return;
     }
 
@@ -1425,6 +1619,167 @@ void C4JRender::DrawVertices(ePrimitiveType PrimitiveType, int count, void *data
         return;
     }
 
+    if (kDebugSkipStandardDraws && vType != C4JRender::VERTEX_TYPE_COMPRESSED) {
+        if (free_draw_data) {
+            free(draw_data);
+        }
+        return;
+    }
+
+    ++g_frame_draw_calls;
+    g_frame_draw_vertices += draw_count;
+    if (vType == C4JRender::VERTEX_TYPE_COMPRESSED) {
+        ++g_frame_compressed_draw_calls;
+    } else {
+        ++g_frame_standard_draw_calls;
+    }
+    if (g_impl->bound_texture_index < 0) {
+        ++g_frame_boundless_draw_calls;
+    }
+
+    bool should_log_standard_draw =
+        false &&
+        (g_frame_index == 600) &&
+        vType != C4JRender::VERTEX_TYPE_COMPRESSED &&
+        (g_frame_standard_draw_calls == 1 ||
+         g_frame_standard_draw_calls == 60 ||
+         g_frame_standard_draw_calls == 120 ||
+         g_frame_standard_draw_calls == 170) &&
+        stride == VERTEX_STRIDE_STANDARD &&
+        draw_count > 0;
+    bool should_log_compressed_draw =
+        true &&
+        (g_frame_index == 600) &&
+        vType == C4JRender::VERTEX_TYPE_COMPRESSED &&
+        g_frame_compressed_draw_calls <= 6 &&
+        stride == 16 &&
+        draw_count > 0;
+
+    if (should_log_standard_draw) {
+        const DebugStandardVertex *verts = static_cast<const DebugStandardVertex *>(draw_data);
+        float min_x = verts[0].x, max_x = verts[0].x;
+        float min_y = verts[0].y, max_y = verts[0].y;
+        float min_z = verts[0].z, max_z = verts[0].z;
+        float min_u = verts[0].u, max_u = verts[0].u;
+        float min_v = verts[0].v, max_v = verts[0].v;
+        for (int i = 1; i < draw_count; ++i) {
+            min_x = std::min(min_x, verts[i].x);
+            max_x = std::max(max_x, verts[i].x);
+            min_y = std::min(min_y, verts[i].y);
+            max_y = std::max(max_y, verts[i].y);
+            min_z = std::min(min_z, verts[i].z);
+            max_z = std::max(max_z, verts[i].z);
+            min_u = std::min(min_u, verts[i].u);
+            max_u = std::max(max_u, verts[i].u);
+            min_v = std::min(min_v, verts[i].v);
+            max_v = std::max(max_v, verts[i].v);
+        }
+
+        int tex_idx = g_impl->bound_texture_index;
+        int tex_w = 0;
+        int tex_h = 0;
+        if (tex_idx >= 0 && tex_idx < MAX_TEXTURES && g_impl->textures[tex_idx].in_use) {
+            tex_w = g_impl->textures[tex_idx].width;
+            tex_h = g_impl->textures[tex_idx].height;
+        }
+
+        NSLog(@"[MetalRenderer] drawdump frame=%d draw=%d prim=%d ps=%d tex=%d texSize=%dx%d verts=%d pos=[%.3f..%.3f %.3f..%.3f %.3f..%.3f] uv=[%.3f..%.3f %.3f..%.3f] firstPos=(%.3f,%.3f,%.3f) firstUV=(%.3f,%.3f) tex2=0x%08x colour=0x%08x normal=0x%08x",
+              g_frame_index,
+              g_frame_standard_draw_calls,
+              (int)PrimitiveType,
+              (int)psType,
+              tex_idx,
+              tex_w,
+              tex_h,
+              draw_count,
+              min_x, max_x,
+              min_y, max_y,
+              min_z, max_z,
+              min_u, max_u,
+              min_v, max_v,
+              verts[0].x, verts[0].y, verts[0].z,
+              verts[0].u, verts[0].v,
+              verts[0].tex2,
+              verts[0].colour,
+              verts[0].normal);
+    }
+    if (should_log_compressed_draw) {
+        const DebugCompressedVertex *verts = static_cast<const DebugCompressedVertex *>(draw_data);
+        float min_x = verts[0].x / 1024.0f, max_x = min_x;
+        float min_y = verts[0].y / 1024.0f, max_y = min_y;
+        float min_z = verts[0].z / 1024.0f, max_z = min_z;
+        float min_u = verts[0].u / 8192.0f, max_u = min_u;
+        float min_v = verts[0].v / 8192.0f, max_v = min_v;
+        for (int i = 1; i < draw_count; ++i) {
+            float x = verts[i].x / 1024.0f;
+            float y = verts[i].y / 1024.0f;
+            float z = verts[i].z / 1024.0f;
+            float u = verts[i].u / 8192.0f;
+            float v = verts[i].v / 8192.0f;
+            min_x = std::min(min_x, x);
+            max_x = std::max(max_x, x);
+            min_y = std::min(min_y, y);
+            max_y = std::max(max_y, y);
+            min_z = std::min(min_z, z);
+            max_z = std::max(max_z, z);
+            min_u = std::min(min_u, u);
+            max_u = std::max(max_u, u);
+            min_v = std::min(min_v, v);
+            max_v = std::max(max_v, v);
+        }
+
+        int tex_idx = g_impl->bound_texture_index;
+        int tex_w = 0;
+        int tex_h = 0;
+        if (tex_idx >= 0 && tex_idx < MAX_TEXTURES && g_impl->textures[tex_idx].in_use) {
+            tex_w = g_impl->textures[tex_idx].width;
+            tex_h = g_impl->textures[tex_idx].height;
+        }
+
+        NSLog(@"[MetalRenderer] compresseddump frame=%d draw=%d prim=%d ps=%d tex=%d texSize=%dx%d verts=%d pos=[%.3f..%.3f %.3f..%.3f %.3f..%.3f] uv=[%.3f..%.3f %.3f..%.3f] firstPos=(%.3f,%.3f,%.3f) firstUV=(%.3f,%.3f) tex2=(%d,%d) colour565=0x%04x",
+              g_frame_index,
+              g_frame_compressed_draw_calls,
+              (int)PrimitiveType,
+              (int)psType,
+              tex_idx,
+              tex_w,
+              tex_h,
+              draw_count,
+              min_x, max_x,
+              min_y, max_y,
+              min_z, max_z,
+              min_u, max_u,
+              min_v, max_v,
+              verts[0].x / 1024.0f, verts[0].y / 1024.0f, verts[0].z / 1024.0f,
+              verts[0].u / 8192.0f, verts[0].v / 8192.0f,
+              verts[0].tex2u, verts[0].tex2v,
+              (uint16_t)verts[0].colour);
+        NSLog(@"[MetalRenderer] compressedmv frame=%d draw=%d mvTranslation=(%.3f,%.3f,%.3f) tint=(%.3f,%.3f,%.3f,%.3f) fog=%d light=%d texM=[%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f] projW=(%.3f,%.3f,%.3f,%.3f)",
+              g_frame_index,
+              g_frame_compressed_draw_calls,
+              g_impl->uniforms.modelview_matrix.columns[3].x,
+              g_impl->uniforms.modelview_matrix.columns[3].y,
+              g_impl->uniforms.modelview_matrix.columns[3].z,
+              g_impl->uniforms.colour_tint.x,
+              g_impl->uniforms.colour_tint.y,
+              g_impl->uniforms.colour_tint.z,
+              g_impl->uniforms.colour_tint.w,
+              g_impl->uniforms.fog_enable,
+              g_impl->uniforms.lighting_enable,
+              g_impl->uniforms.texture_matrix.columns[0].x,
+              g_impl->uniforms.texture_matrix.columns[0].y,
+              g_impl->uniforms.texture_matrix.columns[0].z,
+              g_impl->uniforms.texture_matrix.columns[0].w,
+              g_impl->uniforms.texture_matrix.columns[3].x,
+              g_impl->uniforms.texture_matrix.columns[3].y,
+              g_impl->uniforms.texture_matrix.columns[3].z,
+              g_impl->uniforms.texture_matrix.columns[3].w,
+              g_impl->uniforms.projection_matrix.columns[0].w,
+              g_impl->uniforms.projection_matrix.columns[1].w,
+              g_impl->uniforms.projection_matrix.columns[2].w,
+              g_impl->uniforms.projection_matrix.columns[3].w);
+    }
+
     // Apply render state (sets pipeline, depth, viewport, uniforms, textures)
     apply_render_state(g_impl, vType, psType);
 
@@ -1433,10 +1788,25 @@ void C4JRender::DrawVertices(ePrimitiveType PrimitiveType, int count, void *data
         return;
     }
 
-    // Upload vertex data and draw
     int data_size = draw_count * stride;
-    [g_impl->current_encoder setVertexBytes:draw_data length:data_size atIndex:0];
-    [g_impl->current_encoder drawPrimitives:metal_primitive vertexStart:0 vertexCount:draw_count];
+
+    // Upload vertex data and draw. Large sky/star display lists can exceed the
+    // reliable size for setVertexBytes on Apple GPUs, so switch to a temporary
+    // shared buffer once the payload gets too large.
+    if ((NSUInteger)data_size > MAX_INLINE_VERTEX_UPLOAD_BYTES) {
+        id<MTLBuffer> vertex_buffer =
+            [g_impl->device newBufferWithBytes:draw_data
+                                        length:(NSUInteger)data_size
+                                       options:MTLResourceStorageModeShared];
+        if (vertex_buffer != nil) {
+            [g_impl->current_encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+            [g_impl->current_encoder drawPrimitives:metal_primitive vertexStart:0 vertexCount:draw_count];
+            [vertex_buffer release];
+        }
+    } else {
+        [g_impl->current_encoder setVertexBytes:draw_data length:(NSUInteger)data_size atIndex:0];
+        [g_impl->current_encoder drawPrimitives:metal_primitive vertexStart:0 vertexCount:draw_count];
+    }
 
     if (free_draw_data) {
         free(draw_data);
@@ -1469,6 +1839,17 @@ void C4JRender::DrawVertexBuffer(ePrimitiveType PrimitiveType, int count, void *
         default: return;
     }
 
+    ++g_frame_draw_calls;
+    g_frame_draw_vertices += count;
+    if (vType == C4JRender::VERTEX_TYPE_COMPRESSED) {
+        ++g_frame_compressed_draw_calls;
+    } else {
+        ++g_frame_standard_draw_calls;
+    }
+    if (g_impl->bound_texture_index < 0) {
+        ++g_frame_boundless_draw_calls;
+    }
+
     apply_render_state(g_impl, vType, psType);
 
     if (g_impl->current_encoder == nil) return;
@@ -1489,24 +1870,32 @@ void C4JRender::CBuffLockStaticCreations()
 
 int C4JRender::CBuffCreate(int count)
 {
-    if (!g_impl) return -1;
+    if (!g_impl || count <= 0) return -1;
 
-    // Find first available slot
-    for (int i = 0; i < MAX_COMMAND_BUFFERS; i++) {
-        if (!g_impl->command_buffers[i].in_use) {
-            g_impl->command_buffers[i].in_use = true;
-            g_impl->command_buffers[i].commands.clear();
-            g_impl->command_buffers[i].is_static = g_impl->command_buffers_locked;
-            return i;
+    int start = g_impl->next_command_buffer_index;
+    int end = start + count;
+    if ((int)g_impl->command_buffers.size() < end) {
+        g_impl->command_buffers.resize(end);
+    }
+
+    for (int i = start; i < end; ++i) {
+        g_impl->command_buffers[i].in_use = true;
+        g_impl->command_buffers[i].commands.clear();
+        g_impl->command_buffers[i].is_static = g_impl->command_buffers_locked;
+        for (int mode = 0; mode < 3; ++mode) {
+            g_impl->command_buffers[i].recorded_base_matrices[mode] = make_identity_matrix();
         }
     }
-    return -1;
+
+    g_impl->next_command_buffer_index = end;
+    return start;
 }
 
 void C4JRender::CBuffDelete(int first, int count)
 {
     if (!g_impl) return;
-    for (int i = first; i < first + count && i < MAX_COMMAND_BUFFERS; i++) {
+    int limit = (int)g_impl->command_buffers.size();
+    for (int i = first; i < first + count && i < limit; i++) {
         if (i >= 0) {
             g_impl->command_buffers[i].in_use = false;
             g_impl->command_buffers[i].commands.clear();
@@ -1516,8 +1905,16 @@ void C4JRender::CBuffDelete(int first, int count)
 
 void C4JRender::CBuffStart(int index, bool full)
 {
-    if (!g_impl || index < 0 || index >= MAX_COMMAND_BUFFERS) return;
-    g_impl->recording_command_buffer = index;
+    if (!g_impl || index < 0 || index >= (int)g_impl->command_buffers.size()) return;
+    if (!g_impl->command_buffers[index].in_use) return;
+    g_recording_command_buffer_tls = index;
+    g_recording_matrix_state.initialised = true;
+    g_recording_matrix_state.mode = 0;
+    for (int mode = 0; mode < 3; ++mode) {
+        g_recording_matrix_state.current[mode] = make_identity_matrix();
+        g_recording_matrix_state.stack[mode] = std::stack<simd_float4x4>();
+        g_impl->command_buffers[index].recorded_base_matrices[mode] = make_identity_matrix();
+    }
     if (full) {
         g_impl->command_buffers[index].commands.clear();
     }
@@ -1525,43 +1922,78 @@ void C4JRender::CBuffStart(int index, bool full)
 
 void C4JRender::CBuffClear(int index)
 {
-    if (!g_impl || index < 0 || index >= MAX_COMMAND_BUFFERS) return;
+    if (!g_impl || index < 0 || index >= (int)g_impl->command_buffers.size()) return;
     g_impl->command_buffers[index].commands.clear();
 }
 
 int C4JRender::CBuffSize(int index)
 {
-    if (!g_impl || index < 0 || index >= MAX_COMMAND_BUFFERS) return 0;
+    if (!g_impl || index < 0 || index >= (int)g_impl->command_buffers.size()) return 0;
     return (int)g_impl->command_buffers[index].commands.size();
 }
 
 void C4JRender::CBuffEnd()
 {
     if (!g_impl) return;
-    g_impl->recording_command_buffer = -1;
+    g_recording_command_buffer_tls = -1;
+    g_recording_matrix_state.initialised = false;
 }
 
 bool C4JRender::CBuffCall(int index, bool full)
 {
-    if (!g_impl || index < 0 || index >= MAX_COMMAND_BUFFERS) return false;
+    if (!g_impl || index < 0 || index >= (int)g_impl->command_buffers.size()) return false;
     if (!g_impl->command_buffers[index].in_use) return false;
 
+    CommandBufferRecord &record = g_impl->command_buffers[index];
+    simd_float4x4 playback_base_matrices[3] = {
+        g_impl->matrix_current[0],
+        g_impl->matrix_current[1],
+        g_impl->matrix_current[2]
+    };
+
     // Replay all recorded commands
-    for (auto &cmd : g_impl->command_buffers[index].commands) {
+    for (auto &cmd : record.commands) {
         if (cmd.type == RecordedDrawCommand::CMD_DRAW_VERTICES) {
             // Restore uniforms snapshot
             g_impl->uniforms = cmd.uniforms_snapshot;
             g_impl->bound_texture_index = cmd.bound_texture_index;
 
-            // Restore matrices from uniforms
-            g_impl->matrix_current[0] = cmd.uniforms_snapshot.modelview_matrix;
-            g_impl->matrix_current[1] = cmd.uniforms_snapshot.projection_matrix;
-            g_impl->matrix_current[2] = cmd.uniforms_snapshot.texture_matrix;
+            // Display-list compilation bakes in list-local transforms such as
+            // chunk translation, but playback must still inherit the live
+            // camera/view matrices. Rebase the recorded local transform onto
+            // the current playback matrices instead of restoring the absolute
+            // compile-time matrices.
+            simd_float4x4 recorded_matrices[3] = {
+                cmd.uniforms_snapshot.modelview_matrix,
+                cmd.uniforms_snapshot.projection_matrix,
+                cmd.uniforms_snapshot.texture_matrix
+            };
+            for (int mode = 0; mode < 3; ++mode) {
+                simd_float4x4 rebased = playback_base_matrices[mode];
+                simd_float4x4 recorded_base = record.recorded_base_matrices[mode];
+                float determinant = simd_determinant(recorded_base);
+                if (fabsf(determinant) > 1.0e-6f) {
+                    rebased = matrix_multiply(
+                        playback_base_matrices[mode],
+                        matrix_multiply(simd_inverse(recorded_base), recorded_matrices[mode]));
+                } else {
+                    rebased = recorded_matrices[mode];
+                }
+                g_impl->matrix_current[mode] = rebased;
+            }
+            g_impl->uniforms.modelview_matrix = g_impl->matrix_current[0];
+            g_impl->uniforms.projection_matrix = g_impl->matrix_current[1];
+            g_impl->uniforms.texture_matrix = g_impl->matrix_current[2];
 
             DrawVertices(cmd.primitive_type, cmd.vertex_count,
                         cmd.vertex_data.data(), cmd.vertex_type, cmd.pixel_shader_type);
         }
     }
+
+    for (int mode = 0; mode < 3; ++mode) {
+        g_impl->matrix_current[mode] = playback_base_matrices[mode];
+    }
+    sync_uniforms(g_impl);
 
     return true;
 }
@@ -1798,11 +2230,26 @@ HRESULT C4JRender::LoadTextureData(const char *szFilename, D3DXIMAGE_INFO *pSrcI
         CGColorSpaceRef colour_space = CGColorSpaceCreateDeviceRGB();
         CGContextRef ctx = CGBitmapContextCreate(
             rgba_data, img_width, img_height, 8, img_width * 4,
-            colour_space, kCGImageAlphaPremultipliedLast);
+            colour_space, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
         CGContextDrawImage(ctx, CGRectMake(0, 0, img_width, img_height), image);
         CGContextRelease(ctx);
         CGColorSpaceRelease(colour_space);
         CGImageRelease(image);
+
+        uint8_t *rgba_bytes = reinterpret_cast<uint8_t *>(rgba_data);
+        const int pixel_count = img_width * img_height;
+        for (int i = 0; i < pixel_count; ++i) {
+            uint8_t r = rgba_bytes[i * 4 + 0];
+            uint8_t g = rgba_bytes[i * 4 + 1];
+            uint8_t b = rgba_bytes[i * 4 + 2];
+            const uint8_t a = rgba_bytes[i * 4 + 3];
+            if (a != 0 && a != 255) {
+                r = uint8_t(std::min(255, (int(r) * 255 + (a / 2)) / int(a)));
+                g = uint8_t(std::min(255, (int(g) * 255 + (a / 2)) / int(a)));
+                b = uint8_t(std::min(255, (int(b) * 255 + (a / 2)) / int(a)));
+            }
+            rgba_data[i] = (int(a) << 24) | (int(r) << 16) | (int(g) << 8) | int(b);
+        }
 
         *ppDataOut = rgba_data;
         return S_OK;
@@ -1838,11 +2285,26 @@ HRESULT C4JRender::LoadTextureData(BYTE *pbData, DWORD dwBytes, D3DXIMAGE_INFO *
         CGColorSpaceRef colour_space = CGColorSpaceCreateDeviceRGB();
         CGContextRef ctx = CGBitmapContextCreate(
             rgba_data, img_width, img_height, 8, img_width * 4,
-            colour_space, kCGImageAlphaPremultipliedLast);
+            colour_space, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
         CGContextDrawImage(ctx, CGRectMake(0, 0, img_width, img_height), image);
         CGContextRelease(ctx);
         CGColorSpaceRelease(colour_space);
         CGImageRelease(image);
+
+        uint8_t *rgba_bytes = reinterpret_cast<uint8_t *>(rgba_data);
+        const int pixel_count = img_width * img_height;
+        for (int i = 0; i < pixel_count; ++i) {
+            uint8_t r = rgba_bytes[i * 4 + 0];
+            uint8_t g = rgba_bytes[i * 4 + 1];
+            uint8_t b = rgba_bytes[i * 4 + 2];
+            const uint8_t a = rgba_bytes[i * 4 + 3];
+            if (a != 0 && a != 255) {
+                r = uint8_t(std::min(255, (int(r) * 255 + (a / 2)) / int(a)));
+                g = uint8_t(std::min(255, (int(g) * 255 + (a / 2)) / int(a)));
+                b = uint8_t(std::min(255, (int(b) * 255 + (a / 2)) / int(a)));
+            }
+            rgba_data[i] = (int(a) << 24) | (int(r) << 16) | (int(g) << 8) | int(b);
+        }
 
         *ppDataOut = rgba_data;
         return S_OK;
