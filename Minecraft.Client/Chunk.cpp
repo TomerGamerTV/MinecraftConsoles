@@ -388,7 +388,11 @@ void Chunk::rebuild()
 							MemSect(0);
 							glPushMatrix();
 							glDepthMask(true);	// 4J added
+#if defined(_APPLE_PLATFORM)
+							t->useCompactVertices(false);
+#else
 							t->useCompactVertices(true);	 // 4J added
+#endif
 							translateToPos();
 							float ss = 1.000001f;
 							// 4J - have removed this scale as I don't think we should need it, and have now optimised the vertex
@@ -704,7 +708,11 @@ void Chunk::rebuild_SPU()
 			MemSect(0);
 			glPushMatrix();
 			glDepthMask(true);	// 4J added
+#if defined(_APPLE_PLATFORM)
+			t->useCompactVertices(false);
+#else
 			t->useCompactVertices(true);	 // 4J added
+#endif
 			translateToPos();
 			float ss = 1.000001f;
 			// 4J - have removed this scale as I don't think we should need it, and have now optimised the vertex

@@ -249,6 +249,12 @@
         _buttonPressedThisFrame[i] = NO;
 }
 
+- (BOOL)isButtonDown:(TouchButtonID)buttonID
+{
+    if (buttonID < 0 || buttonID >= TouchButton_Count) return NO;
+    return _buttonPressed[buttonID];
+}
+
 - (BOOL)isButtonPressed:(TouchButtonID)buttonID
 {
     if (buttonID < 0 || buttonID >= TouchButton_Count) return NO;

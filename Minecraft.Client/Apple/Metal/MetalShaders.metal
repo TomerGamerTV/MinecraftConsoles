@@ -15,8 +15,9 @@ using namespace metal;
 #define DEBUG_VISUALIZE_UV_GRADIENT 0
 #define DEBUG_BYPASS_TEXTURE_MATRIX 0
 #define DEBUG_VISUALIZE_VERTEX_PATH 0
-#define DEBUG_DISABLE_LIGHT_TEXTURE 0
+#define DEBUG_DISABLE_LIGHT_TEXTURE 1
 #define DEBUG_DISABLE_FOG 0
+#define DEBUG_FORCE_OPAQUE_TEXTURE_ALPHA 0
 
 // Shared uniform data passed from CPU to GPU each draw call
 struct Uniforms {
@@ -121,12 +122,10 @@ static float4 sample_game_texture(
     float2 encoded_uv)
 {
     float2 sample_uv = encoded_uv;
-    bool disable_mipmap = sample_uv.x > 1.0;
-    if (disable_mipmap) {
+    if (sample_uv.x > 1.0) {
         sample_uv.x -= 1.0;
-        return tex.sample(tex_sampler, sample_uv, level(0.0));
     }
-    return tex.sample(tex_sampler, sample_uv);
+    return tex.sample(tex_sampler, sample_uv, level(0.0));
 }
 
 // ------------------------------------------------------------------
@@ -330,8 +329,7 @@ vertex VertexOut vertex_compressed(
     out.light_texcoord = decode_light_texcoord(in.uv_and_aux.zw, uniforms);
 
     // Colour is packed as RGB565. Alpha is implicit for this path.
-    uint packed_colour_biased = uint(as_type<ushort>(in.position_and_colour.w));
-    ushort packed_colour = ushort((packed_colour_biased + 32768u) & 0xFFFFu);
+    ushort packed_colour = as_type<ushort>(in.position_and_colour.w);
     float red = float((packed_colour >> 11) & 0x1F) / 31.0;
     float green = float((packed_colour >> 5) & 0x3F) / 63.0;
     float blue = float(packed_colour & 0x1F) / 31.0;
@@ -357,7 +355,8 @@ fragment float4 fragment_standard(
     constant Uniforms &uniforms [[buffer(1)]],
     texture2d<float> tex [[texture(0)]],
     texture2d<float> light_tex [[texture(1)]],
-    sampler tex_sampler [[sampler(0)]])
+    sampler tex_sampler [[sampler(0)]],
+    sampler light_sampler [[sampler(1)]])
 {
 #if DEBUG_VISUALIZE_SOLID_WHITE
     return float4(1.0, 1.0, 1.0, 1.0);
@@ -378,8 +377,12 @@ fragment float4 fragment_standard(
     float4 final_colour = tex_colour * in.colour;
 
     if (!DEBUG_DISABLE_LIGHT_TEXTURE && light_tex.get_width() > 0) {
-        final_colour.rgb *= light_tex.sample(tex_sampler, in.light_texcoord).rgb;
+        final_colour.rgb *= light_tex.sample(light_sampler, in.light_texcoord).rgb;
     }
+#endif
+
+#if DEBUG_FORCE_OPAQUE_TEXTURE_ALPHA
+    final_colour.a = 1.0;
 #endif
 
     // Alpha test: discard fragments that fail the comparison
@@ -453,7 +456,8 @@ fragment float4 fragment_projection(
     constant Uniforms &uniforms [[buffer(1)]],
     texture2d<float> tex [[texture(0)]],
     texture2d<float> light_tex [[texture(1)]],
-    sampler tex_sampler [[sampler(0)]])
+    sampler tex_sampler [[sampler(0)]],
+    sampler light_sampler [[sampler(1)]])
 {
 #if DEBUG_VISUALIZE_SOLID_WHITE
     return float4(1.0, 1.0, 1.0, 1.0);
@@ -472,8 +476,12 @@ fragment float4 fragment_projection(
     float4 final_colour = tex_colour * in.colour;
 
     if (!DEBUG_DISABLE_LIGHT_TEXTURE && light_tex.get_width() > 0) {
-        final_colour.rgb *= light_tex.sample(tex_sampler, in.light_texcoord).rgb;
+        final_colour.rgb *= light_tex.sample(light_sampler, in.light_texcoord).rgb;
     }
+#endif
+
+#if DEBUG_FORCE_OPAQUE_TEXTURE_ALPHA
+    final_colour.a = 1.0;
 #endif
 
     if (uniforms.alpha_test_enable) {
@@ -498,7 +506,8 @@ fragment float4 fragment_force_lod(
     constant Uniforms &uniforms [[buffer(1)]],
     texture2d<float> tex [[texture(0)]],
     texture2d<float> light_tex [[texture(1)]],
-    sampler tex_sampler [[sampler(0)]])
+    sampler tex_sampler [[sampler(0)]],
+    sampler light_sampler [[sampler(1)]])
 {
 #if DEBUG_VISUALIZE_SOLID_WHITE
     return float4(1.0, 1.0, 1.0, 1.0);
@@ -521,8 +530,12 @@ fragment float4 fragment_force_lod(
     float4 final_colour = tex_colour * in.colour;
 
     if (!DEBUG_DISABLE_LIGHT_TEXTURE && light_tex.get_width() > 0) {
-        final_colour.rgb *= light_tex.sample(tex_sampler, in.light_texcoord).rgb;
+        final_colour.rgb *= light_tex.sample(light_sampler, in.light_texcoord).rgb;
     }
+#endif
+
+#if DEBUG_FORCE_OPAQUE_TEXTURE_ALPHA
+    final_colour.a = 1.0;
 #endif
 
     if (uniforms.alpha_test_enable) {

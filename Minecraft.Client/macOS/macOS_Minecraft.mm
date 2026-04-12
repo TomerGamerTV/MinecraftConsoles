@@ -494,6 +494,12 @@ static void ProcessControlCommand(const std::string& rawLine)
         return;
     }
 
+    if (line == "dump") {
+        GameLog("CONTROL: dump requested");
+        RenderManager.DoScreenGrabOnNextPresent();
+        return;
+    }
+
     std::istringstream stream(line);
     std::string command;
     stream >> command;

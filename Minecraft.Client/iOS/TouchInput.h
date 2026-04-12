@@ -61,7 +61,6 @@ typedef struct
 // Current state (read every frame by the game loop)
 @property (nonatomic, readonly) TouchJoystickState joystickState;
 @property (nonatomic, readonly) TouchLookState     lookState;
-@property (nonatomic, readonly) BOOL               buttonDown[TouchButton_Count];
 
 // Configuration
 @property (nonatomic, strong) TouchInputConfig* config;
@@ -71,6 +70,9 @@ typedef struct
 
 // Call once per frame to reset per-frame deltas (look delta)
 - (void)consumeFrameDeltas;
+
+// Query whether a specific button is currently held down
+- (BOOL)isButtonDown:(TouchButtonID)buttonID;
 
 // Query whether a specific button was pressed this frame
 - (BOOL)isButtonPressed:(TouchButtonID)buttonID;

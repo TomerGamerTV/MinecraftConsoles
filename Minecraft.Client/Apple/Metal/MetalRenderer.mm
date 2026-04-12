@@ -18,6 +18,9 @@
 
 #include "../AppleTypes.h"
 #include "../4JLibs/inc/4J_Render.h"
+#include "../../Minecraft.h"
+#include "../../MultiPlayerLocalPlayer.h"
+#include "../../MultiPlayerLevel.h"
 
 // ------------------------------------------------------------------
 // Constants
@@ -115,6 +118,7 @@ struct RecordedDrawCommand {
     // State data (stored as a snapshot of relevant state)
     MetalUniforms uniforms_snapshot;
     int bound_texture_index;
+    bool compressed_vertices_expanded;
 };
 
 // Command buffer recording
@@ -194,6 +198,7 @@ struct MetalRendererImpl {
     MetalTextureEntry textures[MAX_TEXTURES];
     int bound_texture_index;        // Currently bound texture
     int bound_vertex_texture_index; // Currently bound vertex texture
+    bool texture_param_targets_vertex;
     int texture_levels_hint;        // Mip levels for next texture creation
 
     // Command buffer recording
@@ -250,6 +255,8 @@ static int g_frame_draw_vertices = 0;
 static int g_frame_boundless_draw_calls = 0;
 static const bool kDebugSkipStandardDraws = false;
 static const bool kDebugDisableCulling = false;
+static bool g_logged_world_probe = false;
+static thread_local bool g_preexpanded_compressed_vertices = false;
 
 static inline bool use_recording_matrix_state()
 {
@@ -285,6 +292,92 @@ struct DebugCompressedVertex {
     int16_t tex2u;
     int16_t tex2v;
 };
+
+static inline int16_t clamp_to_i16(int value)
+{
+    if (value < -32768) return -32768;
+    if (value > 32767) return 32767;
+    return static_cast<int16_t>(value);
+}
+
+static bool expand_compact_vertices(
+    const void *data_in,
+    int logical_vertex_count,
+    std::vector<DebugCompressedVertex> &expanded_vertices)
+{
+    if (data_in == nullptr || logical_vertex_count <= 0 || (logical_vertex_count % 4) != 0) {
+        return false;
+    }
+
+    const uint32_t *words = static_cast<const uint32_t *>(data_in);
+    size_t word_index = 0;
+
+    expanded_vertices.clear();
+    expanded_vertices.reserve((size_t)logical_vertex_count);
+
+    for (int quad = 0; quad < logical_vertex_count; quad += 4) {
+        const uint32_t *base = words + word_index;
+        word_index += 8;
+
+        const int base_x = ((int)((base[0] >> 26) & 0x1F) - 16) * 1024;
+        const int base_y = ((int)((base[0] >> 21) & 0x1F) - 16) * 1024;
+        const int base_z = ((int)((base[0] >> 16) & 0x1F) - 16) * 1024;
+
+        bool uses_explicit_uvs = false;
+        for (int i = 0; i < 4; ++i) {
+            if ((base[i * 2 + 1] & 0x7) == 4) {
+                uses_explicit_uvs = true;
+                break;
+            }
+        }
+
+        const uint32_t *explicit_uvs = nullptr;
+        if (uses_explicit_uvs) {
+            explicit_uvs = words + word_index;
+            word_index += 8;
+        }
+
+        const uint16_t min_u = static_cast<uint16_t>((base[2] >> 16) & 0xFFFF);
+        const uint16_t min_v = static_cast<uint16_t>((base[4] >> 16) & 0xFFFF);
+        const uint16_t delta_u = static_cast<uint16_t>((base[6] >> 24) & 0xFF);
+        const uint16_t delta_v = static_cast<uint16_t>((base[6] >> 16) & 0xFF);
+
+        for (int i = 0; i < 4; ++i) {
+            const uint32_t pos_word = base[i * 2 + 0];
+            const uint32_t aux_word = base[i * 2 + 1];
+            const uint32_t uv_code = aux_word & 0x7;
+
+            uint16_t raw_u = min_u;
+            uint16_t raw_v = min_v;
+
+            if (uv_code == 4 && explicit_uvs != nullptr) {
+                const uint32_t packed_uv = explicit_uvs[i * 2 + 1];
+                raw_u = static_cast<uint16_t>((packed_uv >> 16) & 0xFFFF);
+                raw_v = static_cast<uint16_t>(packed_uv & 0xFFFF);
+            } else {
+                if ((uv_code & 0x2) != 0) raw_u = static_cast<uint16_t>(raw_u + delta_u);
+                if ((uv_code & 0x1) != 0) raw_v = static_cast<uint16_t>(raw_v + delta_v);
+            }
+
+            const uint8_t packed_light = static_cast<uint8_t>((aux_word >> 16) & 0xFF);
+            const int light_block = (packed_light >> 4) & 0xF;
+            const int light_sky = packed_light & 0xF;
+
+            DebugCompressedVertex vertex = {};
+            vertex.x = clamp_to_i16(base_x + (int)((pos_word >> 8) & 0xFF) * 8);
+            vertex.y = clamp_to_i16(base_y + (int)(pos_word & 0xFF) * 8);
+            vertex.z = clamp_to_i16(base_z + (int)((aux_word >> 24) & 0xFF) * 8);
+            vertex.colour = static_cast<int16_t>(aux_word & 0xFFFF);
+            vertex.u = clamp_to_i16((int)raw_u * 2);
+            vertex.v = clamp_to_i16((int)raw_v * 2);
+            vertex.tex2u = static_cast<int16_t>(light_block << 4);
+            vertex.tex2v = static_cast<int16_t>(light_sky << 4);
+            expanded_vertices.push_back(vertex);
+        }
+    }
+
+    return true;
+}
 
 // ------------------------------------------------------------------
 // Helper: create a 4x4 identity matrix using simd
@@ -831,6 +924,98 @@ static void end_render_encoder(MetalRendererImpl *impl)
     }
 }
 
+static void debug_dump_current_drawable(MetalRendererImpl *impl)
+{
+    if (impl->current_drawable == nil || impl->current_command_buffer == nil) {
+        return;
+    }
+
+    NSString *path = nil;
+    if (impl->screen_grab_pending) {
+        path = @"/tmp/mc_control_dump.png";
+    } else {
+        switch (g_frame_index) {
+            case 360: path = @"/tmp/mc_internal_360.png"; break;
+            case 600: path = @"/tmp/mc_internal_600.png"; break;
+            case 840: path = @"/tmp/mc_internal_840.png"; break;
+            default: return;
+        }
+    }
+
+    id<MTLTexture> texture = impl->current_drawable.texture;
+    const NSUInteger width = texture.width;
+    const NSUInteger height = texture.height;
+    if (width == 0 || height == 0) {
+        return;
+    }
+
+    const NSUInteger bytes_per_pixel = 4;
+    const NSUInteger bytes_per_row = ((width * bytes_per_pixel) + 255u) & ~255u;
+    const NSUInteger buffer_length = bytes_per_row * height;
+    id<MTLBuffer> readback_buffer =
+        [impl->device newBufferWithLength:buffer_length options:MTLResourceStorageModeShared];
+    if (readback_buffer == nil) {
+        return;
+    }
+
+    id<MTLBlitCommandEncoder> blit = [impl->current_command_buffer blitCommandEncoder];
+    [blit copyFromTexture:texture
+              sourceSlice:0
+              sourceLevel:0
+             sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake(width, height, 1)
+                 toBuffer:readback_buffer
+        destinationOffset:0
+   destinationBytesPerRow:bytes_per_row
+ destinationBytesPerImage:buffer_length];
+    [blit endEncoding];
+
+    NSString *path_copy = [path copy];
+    [impl->current_command_buffer addCompletedHandler:^(id<MTLCommandBuffer>) {
+        @autoreleasepool {
+            NSMutableData *tight_pixels = [NSMutableData dataWithLength:width * height * bytes_per_pixel];
+            uint8_t *dst = static_cast<uint8_t *>(tight_pixels.mutableBytes);
+            const uint8_t *src = static_cast<const uint8_t *>(readback_buffer.contents);
+            for (NSUInteger y = 0; y < height; ++y) {
+                memcpy(dst + y * width * bytes_per_pixel,
+                       src + y * bytes_per_row,
+                       width * bytes_per_pixel);
+            }
+
+            CGColorSpaceRef colour_space = CGColorSpaceCreateDeviceRGB();
+            CGContextRef ctx = CGBitmapContextCreate(
+                dst,
+                width,
+                height,
+                8,
+                width * bytes_per_pixel,
+                colour_space,
+                kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+            CGImageRef image = ctx ? CGBitmapContextCreateImage(ctx) : nil;
+            if (ctx) {
+                CGContextRelease(ctx);
+            }
+            CGColorSpaceRelease(colour_space);
+
+            if (image) {
+                NSURL *url = [NSURL fileURLWithPath:path_copy];
+                CGImageDestinationRef dest = CGImageDestinationCreateWithURL(
+                    (__bridge CFURLRef)url, kUTTypePNG, 1, nullptr);
+                if (dest) {
+                    CGImageDestinationAddImage(dest, image, nullptr);
+                    CGImageDestinationFinalize(dest);
+                    CFRelease(dest);
+                    NSLog(@"[MetalRenderer] dumped drawable frame=%d to %@", g_frame_index, path_copy);
+                }
+                CGImageRelease(image);
+            }
+        }
+
+        [path_copy release];
+        [readback_buffer release];
+    }];
+}
+
 // ------------------------------------------------------------------
 // Helper: get the appropriate depth stencil state for current settings
 // ------------------------------------------------------------------
@@ -919,7 +1104,7 @@ static void apply_render_state(MetalRendererImpl *impl, C4JRender::eVertexType v
     } else {
         [impl->current_encoder setCullMode:MTLCullModeNone];
     }
-    [impl->current_encoder setFrontFacingWinding:MTLWindingCounterClockwise];
+    [impl->current_encoder setFrontFacingWinding:MTLWindingClockwise];
 
     // Depth bias
     if (impl->depth_slope != 0.0f || impl->depth_bias != 0.0f) {
@@ -1293,6 +1478,7 @@ void C4JRender::Initialise(void *pDevice, void *pSwapChain)
     // Texture management init
     g_impl->bound_texture_index = -1;
     g_impl->bound_vertex_texture_index = -1;
+    g_impl->texture_param_targets_vertex = false;
     g_impl->texture_levels_hint = 1;
     for (int i = 0; i < MAX_TEXTURES; i++) {
         g_impl->textures[i].in_use = false;
@@ -1412,6 +1598,30 @@ void C4JRender::Present()
                   g_frame_standard_draw_calls,
                   g_frame_boundless_draw_calls);
         }
+
+        if (!g_logged_world_probe && g_frame_index >= 600) {
+            Minecraft *mc = Minecraft::GetInstance();
+            if (mc && mc->player && mc->level) {
+                const int px = (int)floor(mc->player->x);
+                const int py = (int)floor(mc->player->y);
+                const int pz = (int)floor(mc->player->z);
+                NSLog(@"[MetalRenderer] worldprobe player=(%d,%d,%d)", px, py, pz);
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dz = -2; dz <= 2; ++dz) {
+                        int row_ids[5];
+                        for (int dx = -2; dx <= 2; ++dx) {
+                            row_ids[dx + 2] = mc->level->getTile(px + dx, py + dy, pz + dz);
+                        }
+                        NSLog(@"[MetalRenderer] worldprobe y=%d z=%d ids=%d,%d,%d,%d,%d",
+                              py + dy, pz + dz,
+                              row_ids[0], row_ids[1], row_ids[2], row_ids[3], row_ids[4]);
+                    }
+                }
+                g_logged_world_probe = true;
+            }
+        }
+
+        debug_dump_current_drawable(g_impl);
 
         // Schedule presentation
         [g_impl->current_command_buffer presentDrawable:g_impl->current_drawable];
@@ -1555,11 +1765,23 @@ void C4JRender::DrawVertices(ePrimitiveType PrimitiveType, int count, void *data
         cmd.pixel_shader_type = psType;
         cmd.vertex_count = count;
         cmd.bound_texture_index = g_impl->bound_texture_index;
+        cmd.compressed_vertices_expanded = false;
 
-        int stride = get_vertex_stride(vType);
-        int data_size = count * stride;
-        cmd.vertex_data.resize(data_size);
-        memcpy(cmd.vertex_data.data(), dataIn, data_size);
+        if (vType == C4JRender::VERTEX_TYPE_COMPRESSED && !g_preexpanded_compressed_vertices) {
+            std::vector<DebugCompressedVertex> expanded_vertices;
+            if (expand_compact_vertices(dataIn, count, expanded_vertices)) {
+                cmd.vertex_data.resize(expanded_vertices.size() * sizeof(DebugCompressedVertex));
+                memcpy(cmd.vertex_data.data(), expanded_vertices.data(), cmd.vertex_data.size());
+                cmd.compressed_vertices_expanded = true;
+            }
+        }
+
+        if (cmd.vertex_data.empty()) {
+            int stride = get_vertex_stride(vType);
+            int data_size = count * stride;
+            cmd.vertex_data.resize(data_size);
+            memcpy(cmd.vertex_data.data(), dataIn, data_size);
+        }
 
         // Snapshot uniforms
         sync_uniforms(g_impl);
@@ -1573,6 +1795,14 @@ void C4JRender::DrawVertices(ePrimitiveType PrimitiveType, int count, void *data
     void *draw_data = dataIn;
     int draw_count = count;
     bool free_draw_data = false;
+    std::vector<DebugCompressedVertex> expanded_compressed_vertices;
+
+    if (vType == C4JRender::VERTEX_TYPE_COMPRESSED && !g_preexpanded_compressed_vertices) {
+        if (expand_compact_vertices(dataIn, count, expanded_compressed_vertices)) {
+            draw_data = expanded_compressed_vertices.data();
+            stride = sizeof(DebugCompressedVertex);
+        }
+    }
 
     MTLPrimitiveType metal_primitive;
 
@@ -1985,8 +2215,11 @@ bool C4JRender::CBuffCall(int index, bool full)
             g_impl->uniforms.projection_matrix = g_impl->matrix_current[1];
             g_impl->uniforms.texture_matrix = g_impl->matrix_current[2];
 
+            bool previous_preexpanded = g_preexpanded_compressed_vertices;
+            g_preexpanded_compressed_vertices = cmd.compressed_vertices_expanded;
             DrawVertices(cmd.primitive_type, cmd.vertex_count,
                         cmd.vertex_data.data(), cmd.vertex_type, cmd.pixel_shader_type);
+            g_preexpanded_compressed_vertices = previous_preexpanded;
         }
     }
 
@@ -2053,12 +2286,14 @@ void C4JRender::TextureBind(int idx)
 {
     if (!g_impl) return;
     g_impl->bound_texture_index = idx;
+    g_impl->texture_param_targets_vertex = false;
 }
 
 void C4JRender::TextureBindVertex(int idx)
 {
     if (!g_impl) return;
     g_impl->bound_vertex_texture_index = idx;
+    g_impl->texture_param_targets_vertex = true;
 }
 
 void C4JRender::TextureSetTextureLevels(int levels)
@@ -2101,7 +2336,7 @@ void C4JRender::TextureData(int width, int height, void *data, int level, eTextu
         int mip_count = entry.mip_levels > 0 ? entry.mip_levels : 1;
 
         MTLTextureDescriptor *desc = [MTLTextureDescriptor
-            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                          width:width
                                         height:height
                                      mipmapped:(mip_count > 1)];
@@ -2154,7 +2389,9 @@ void C4JRender::TextureDataUpdate(int xoffset, int yoffset, int width, int heigh
 void C4JRender::TextureSetParam(int param, int value)
 {
     if (!g_impl) return;
-    int idx = g_impl->bound_texture_index;
+    int idx = g_impl->texture_param_targets_vertex
+        ? g_impl->bound_vertex_texture_index
+        : g_impl->bound_texture_index;
     if (idx < 0 || idx >= MAX_TEXTURES || !g_impl->textures[idx].in_use) return;
 
     MetalTextureEntry &entry = g_impl->textures[idx];
