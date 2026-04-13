@@ -8,24 +8,61 @@
 
 // Forward-declare Metal types so this header compiles in pure C++ TUs.
 // The .mm implementation file imports <Metal/Metal.h> for the real types.
+// Do not declare a fallback `id` here: Apple SDK headers provide the real
+// Objective-C runtime types and C++ TUs only store them as opaque `void*`.
 #ifdef __OBJC__
 @protocol MTLDevice;
 @protocol MTLCommandQueue;
 @protocol MTLTexture;
-#else
-typedef void* id;
 #endif
 
 class Apple_UIController : public UIController
 {
 private:
+    enum class NativeOverlayMode : unsigned char
+    {
+        Hidden,
+        MainMenu,
+        LoadingWorld,
+        PauseMenu
+    };
+
     // Metal render targets (opaque pointers in C++ TUs, real ids in ObjC++)
     void* m_metalDevice;           // id<MTLDevice>
     void* m_metalCommandQueue;     // id<MTLCommandQueue>
     void* m_colorTexture;          // id<MTLTexture> (current render target)
     void* m_depthStencilTexture;   // id<MTLTexture>
+    NativeOverlayMode m_nativeOverlayMode;
+    bool m_nativeWorldLaunchPending;
+    bool m_nativeTrialTimerVisible;
+    bool m_nativeAutosaveCountdownVisible;
+    bool m_nativeSavingMessageVisible;
+    bool m_nativePlayerDisplayNameVisible;
+    unsigned int m_nativeAutosaveCountdownSeconds;
+    unsigned int m_worldReadyStableFrames;
+    double m_nativeWorldLaunchStartedAt;
+    std::wstring m_nativeStatusText;
+
+    void SetNativeOverlayMode(NativeOverlayMode mode);
+    void RefreshNativeOverlayStatus();
+    void SyncNativeOverlay();
+    bool IsNativeWorldReadyForGameplay() const;
 
 public:
+    void ShowNativeMainMenu();
+    void HideNativeMainMenu();
+    void StartNativeMainMenuWorld();
+    bool IsNativeWorldLaunchPending() const { return m_nativeWorldLaunchPending; }
+    bool IsNativeOverlayVisible() const { return m_nativeOverlayMode != NativeOverlayMode::Hidden; }
+    bool IsNativeLoadingOverlayVisible() const { return m_nativeOverlayMode == NativeOverlayMode::LoadingWorld; }
+    std::wstring GetNativeOverlayStatusText() const;
+    void HandleNativeTrialTimer(bool show);
+    void HandleNativeTrialTimerUpdate(unsigned int iPad);
+    void HandleNativeAutosaveCountdownTimer(bool show);
+    void HandleNativeAutosaveCountdownUpdate(unsigned int uiSeconds);
+    void HandleNativeSavingMessage(unsigned int iPad, C4JStorage::ESavingMessage eVal);
+    void HandleNativePlayerDisplayname(bool show);
+
     // Initialise with Metal device and render targets
     // width/height = backbuffer dimensions in pixels
     void init(void* metalDevice, void* metalCommandQueue,
@@ -64,6 +101,12 @@ public:
     virtual void RemoveInteractSceneReference(int iPad, UIScene *scene) override;
     virtual void SetTutorialVisible(int iPad, bool visible) override;
     virtual bool IsTutorialVisible(int iPad) override;
+    virtual void ShowTrialTimer(bool show) override;
+    virtual void UpdateTrialTimer(unsigned int iPad) override;
+    virtual void ShowAutosaveCountdownTimer(bool show) override;
+    virtual void UpdateAutosaveCountdownTimer(unsigned int uiSeconds) override;
+    virtual void ShowSavingMessage(unsigned int iPad, C4JStorage::ESavingMessage eVal) override;
+    virtual void ShowPlayerDisplayname(bool show) override;
 
     // Iggy custom draw callbacks (stubs until GDraw Metal is integrated)
     void beginIggyCustomDraw4J(IggyCustomDrawCallbackRegion* region, CustomDrawData* customDrawRegion) override;

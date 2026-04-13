@@ -2766,6 +2766,10 @@ void UIController::ShowOtherPlayersBaseScene(unsigned int iPad, bool show)
 
 void UIController::ShowTrialTimer(bool show)
 {
+#if defined(_APPLE_PLATFORM)
+	ui.HandleNativeTrialTimer(show);
+	return;
+#endif
 	if(m_groups[static_cast<int>(eUIGroup_Fullscreen)]->getPressStartToPlay()) m_groups[static_cast<int>(eUIGroup_Fullscreen)]->getPressStartToPlay()->showTrialTimer(show);
 }
 
@@ -2776,6 +2780,10 @@ void UIController::SetTrialTimerLimitSecs(unsigned int uiSeconds)
 
 void UIController::UpdateTrialTimer(unsigned int iPad)
 {
+#if defined(_APPLE_PLATFORM)
+	ui.HandleNativeTrialTimerUpdate(iPad);
+	return;
+#endif
 	WCHAR wcTime[20];
 
 	DWORD dwTimeTicks=static_cast<DWORD>(app.getTrialTimer());
@@ -2832,11 +2840,19 @@ void UIController::ReduceTrialTimerValue()
 
 void UIController::ShowAutosaveCountdownTimer(bool show)
 {
+#if defined(_APPLE_PLATFORM)
+	ui.HandleNativeAutosaveCountdownTimer(show);
+	return;
+#endif
 	if(m_groups[static_cast<int>(eUIGroup_Fullscreen)]->getPressStartToPlay()) m_groups[static_cast<int>(eUIGroup_Fullscreen)]->getPressStartToPlay()->showTrialTimer(show);
 }
 
 void UIController::UpdateAutosaveCountdownTimer(unsigned int uiSeconds)
 {
+#if defined(_APPLE_PLATFORM)
+	ui.HandleNativeAutosaveCountdownUpdate(uiSeconds);
+	return;
+#endif
 #if !(defined(_XBOX_ONE) || defined(__ORBIS__))
 	WCHAR wcAutosaveCountdown[100];
 	swprintf( wcAutosaveCountdown, 100, app.GetString(IDS_AUTOSAVE_COUNTDOWN),uiSeconds);
@@ -2846,6 +2862,10 @@ void UIController::UpdateAutosaveCountdownTimer(unsigned int uiSeconds)
 
 void UIController::ShowSavingMessage(unsigned int iPad, C4JStorage::ESavingMessage eVal)
 {
+#if defined(_APPLE_PLATFORM)
+	ui.HandleNativeSavingMessage(iPad, eVal);
+	return;
+#endif
 	bool show = false;
 	switch(eVal)
 	{
@@ -2862,6 +2882,10 @@ void UIController::ShowSavingMessage(unsigned int iPad, C4JStorage::ESavingMessa
 
 void UIController::ShowPlayerDisplayname(bool show)
 {
+#if defined(_APPLE_PLATFORM)
+	ui.HandleNativePlayerDisplayname(show);
+	return;
+#endif
 	if(m_groups[static_cast<int>(eUIGroup_Fullscreen)]->getPressStartToPlay()) m_groups[static_cast<int>(eUIGroup_Fullscreen)]->getPressStartToPlay()->showPlayerDisplayName(show);
 }
 

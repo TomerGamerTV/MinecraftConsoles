@@ -153,6 +153,14 @@ static int g_framesWithoutLevel = 0;
 static time_t g_lastControlMTime = 0;
 static bool g_frameInProgress = false;
 
+extern "C" void AppleMarkWorldStartRequested()
+{
+    g_autoStartIssued = true;
+    g_framesWithoutGameStart = 0;
+    g_framesWithoutLevel = 0;
+    GameLog("World start requested from Apple frontend");
+}
+
 // ── Key Code Mapping ─────────────────────────────────────────────────────────
 
 static int MapMacKeyToVK(unsigned short keyCode)
@@ -500,6 +508,22 @@ static void ProcessControlCommand(const std::string& rawLine)
         return;
     }
 
+    if (line == "menu") {
+        GameLog("CONTROL: show menu");
+        ui.ShowNativeMainMenu();
+        return;
+    }
+
+    if (line == "start" || line == "play") {
+        if (!app.GetGameStarted()) {
+            GameLog("CONTROL: start world from menu");
+            ui.StartNativeMainMenuWorld();
+        } else {
+            GameLog("CONTROL: start ignored, world already running");
+        }
+        return;
+    }
+
     std::istringstream stream(line);
     std::string command;
     stream >> command;
@@ -833,12 +857,7 @@ static void PollControlFile()
             g_gameInitialized = true;
             GameLog("=== Game initialization SUCCEEDED ===");
             GameLog("Minecraft instance: %p", g_pMinecraft);
-
-            // Auto-start a creative world for testing
-            GameLog("=== Auto-starting test world ===");
-            g_autoStartIssued = true;
-            app.TemporaryCreateGameStart();
-            GameLog("=== Test world started ===");
+            GameLog("=== Waiting at main menu for user-driven world start ===");
         } else {
             GameLog("=== Game initialization FAILED (nullptr) ===");
         }
@@ -1004,6 +1023,18 @@ static void PollControlFile()
     // F11 toggles fullscreen
     if (vk == 0x7A) {
         ToggleFullscreen();
+        return;
+    }
+
+    if (vk == 0x1B && g_gameInitialized && g_pMinecraft && app.GetGameStarted()) {
+        if (ui.IsNativeWorldLaunchPending()) {
+            GameLog("ESC ignored while Apple loading overlay is active");
+            return;
+        }
+        if (ui.GetMenuDisplayed(ProfileManager.GetPrimaryPad()))
+            ui.HideNativeMainMenu();
+        else
+            ui.ShowNativeMainMenu();
         return;
     }
 
