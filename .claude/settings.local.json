@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(grep -r \"macOS\\\\|iOS\\\\|Mac\\\\|iPhone\\\\|iPad\" /Users/borisg/Downloads/MinecraftConsoles --include=*.cpp --include=*.h)",
-      "Bash(/Users/borisg/Downloads/MinecraftConsoles/Minecraft.Client/Apple/Apple_App.h:*)",
-      "Echo"
-    ]
-  }
-}
